@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>4K Upscaler</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>Video Upscaler</h1>
+
+    <section id="uploadSection">
+      <form id="uploadForm">
+        <label class="field">
+          <span>Clip</span>
+          <input type="file" id="fileInput" accept="video/*" required>
+        </label>
+
+        <label class="field">
+          <span>Engine</span>
+          <select id="engineSelect" required></select>
+        </label>
+
+        <label class="field">
+          <span>Scale</span>
+          <select id="scaleSelect" required></select>
+        </label>
+
+        <label class="field">
+          <span>GPU</span>
+          <select id="gpuSelect" required></select>
+        </label>
+
+        <button type="submit" id="submitBtn">Upscale</button>
+      </form>
+      <p id="engineHint" class="hint"></p>
+    </section>
+
+    <section id="progressSection" hidden>
+      <p id="progressMessage">queued</p>
+      <div class="progress-bar">
+        <div id="progressFill" class="progress-fill"></div>
+      </div>
+    </section>
+
+    <section id="errorSection" hidden>
+      <p id="errorMessage" class="error"></p>
+    </section>
+
+    <section id="compareSection" hidden>
+      <h2>Before / After</h2>
+      <div class="compare-frame" id="compareFrame">
+        <video id="videoBefore" class="compare-video" muted playsinline loop></video>
+        <video id="videoAfter" class="compare-video compare-video-after" muted playsinline loop></video>
+        <div class="compare-divider" id="compareDivider"></div>
+        <input type="range" id="compareRange" min="0" max="100" value="50">
+      </div>
+      <div class="compare-controls">
+        <button id="playPauseBtn">Play</button>
+        <a id="downloadLink" download>Download upscaled video</a>
+      </div>
+      <p class="hint">Audio is muted here for comparison — download the result to hear it.</p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
