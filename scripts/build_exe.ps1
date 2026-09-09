@@ -18,6 +18,13 @@ Write-Host "== Build dependencies =="
 & $venvPython -m pip install --upgrade pyinstaller pyinstaller-hooks-contrib
 
 Write-Host "== PyInstaller =="
+# a running copy of the previous build keeps its DLLs locked
+$running = Get-Process -Name Upscaler -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Dist*" }
+if ($running) {
+    Write-Host "stopping running Upscaler.exe from the previous build"
+    $running | Stop-Process -Force
+    Start-Sleep -Seconds 2
+}
 if (Test-Path $Dist) { Remove-Item $Dist -Recurse -Force }
 & $venvPython -m PyInstaller --noconfirm --clean upscaler.spec
 if (-not (Test-Path (Join-Path $Dist "Upscaler.exe"))) { Write-Error "PyInstaller did not produce dist\Upscaler\Upscaler.exe" }
