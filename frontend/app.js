@@ -40,6 +40,9 @@ const compareRange = $("compareRange");
 const compareDivider = $("compareDivider");
 const playPauseBtn = $("playPauseBtn");
 const downloadLink = $("downloadLink");
+const outputPath = $("outputPath");
+const beforeHint = $("beforeHint");
+let beforeTimer = null;
 
 const jobsSection = $("jobsSection");
 const jobsBody = $("jobsBody");
@@ -447,8 +450,31 @@ function describeRender(job) {
 
 function showCompare(job) {
   compareTitle.textContent = `Before / After — ${describeRender(job)}`;
-  videoBefore.src = `/api/jobs/${job.id}/before`;
   videoAfter.src = `/api/jobs/${job.id}/output`;
+  outputPath.textContent = job.output_path ? `Saved to ${job.output_path}` : "";
+  clearInterval(beforeTimer);
+  if (job.before_ready) {
+    videoBefore.src = `/api/jobs/${job.id}/before`;
+    beforeHint.hidden = true;
+  } else {
+    // full renders report done before the source-side copy exists
+    videoBefore.removeAttribute("src");
+    beforeHint.hidden = false;
+    beforeTimer = setInterval(async () => {
+      try {
+        const fresh = await fetchJson(`/api/jobs/${job.id}`);
+        if (fresh.before_ready || fresh.status !== "done") {
+          clearInterval(beforeTimer);
+          if (fresh.before_ready) {
+            videoBefore.src = `/api/jobs/${job.id}/before`;
+            beforeHint.hidden = true;
+          }
+        }
+      } catch {
+        clearInterval(beforeTimer);
+      }
+    }, 3000);
+  }
   downloadLink.href = `/api/jobs/${job.id}/output?download=1`;
   downloadLink.download = job.output_filename;
   downloadLink.textContent = `Download ${job.output_filename}`;

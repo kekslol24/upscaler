@@ -487,13 +487,17 @@ def make_proxy(input_path: Path, output_path: Path, clip: Clip | None = None) ->
     it) for the before/after view — the upload itself may be 10-bit HEVC
     in an MKV, which no browser plays."""
     _require_ffmpeg()
+    args = encode_args(EncodeSettings(codec="h264", quality=20), "mp4")
+    if "libx264" in args:
+        # CPU fallback: speed matters far more than size for a viewing copy
+        args[args.index("-preset") + 1] = "veryfast"
     proc.run(
         [
             "ffmpeg", "-y", "-v", "error",
             *_clip_input_args(clip),
             "-i", str(input_path),
             "-map", "0:v:0", "-an",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            *args,
             str(output_path),
         ],
         check=True,

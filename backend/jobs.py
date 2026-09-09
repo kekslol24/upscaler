@@ -146,6 +146,8 @@ class Job:
             "width": self.width,
             "height": self.height,
             "has_output": self.output_path is not None and self.output_path.exists(),
+            "output_path": str(self.output_path) if self.output_path and self.output_path.exists() else None,
+            "before_ready": self.before_path is not None and self.before_path.exists(),
             "output_filename": self.output_filename,
             "created_at": self.created_at,
         }
@@ -470,9 +472,23 @@ class JobManager:
         if job.cancel_requested.is_set():
             raise JobCancelled()
 
-        job.before_path = self._before_video(job, options.clip)
+        if options.clip is not None:
+            # previews are short: build the matching source clip before reporting done
+            job.before_path = self._before_video(job, options.clip)
+            job.progress = 100
+            self._finish(job, "done", "done")
+            return
+        # a full render is done — and downloadable — as soon as the file is;
+        # the browser-playable copy of the source for the compare view can
+        # take minutes for a long episode, so it is built afterwards
+        job.before_path = None
         job.progress = 100
         self._finish(job, "done", "done")
+        try:
+            job.before_path = self._before_video(job, None)
+        except Exception as exc:  # noqa: BLE001 - the render itself succeeded
+            job.message = f"done (no comparison copy: {exc})"
+        self._save(job)
 
     def _run_chunked(
         self,
@@ -649,8 +665,9 @@ class JobManager:
             return job.input_path
         proxy = job.dir / "input_proxy.mp4"
         if not proxy.exists():
-            job.message = "preparing browser-playable copy of the source"
+            job.message = "done · preparing the source copy for the compare view"
             pipeline.make_proxy(job.input_path, proxy)
+            job.message = "done"
         return proxy
 
 
