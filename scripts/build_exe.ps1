@@ -25,7 +25,7 @@ if (-not (Test-Path (Join-Path $Dist "Upscaler.exe"))) { Write-Error "PyInstalle
 Write-Host "== Engines and models =="
 foreach ($dir in @("engines_bin", "models")) {
     $src = Join-Path $RootDir $dir
-    if (-not (Test-Path $src)) { Write-Error "$dir missing — run scripts\setup.ps1 (and export the ONNX models) first" }
+    if (-not (Test-Path $src)) { Write-Error "$dir missing - run scripts\setup.ps1 (and export the ONNX models) first" }
     Copy-Item $src (Join-Path $Dist $dir) -Recurse -Force
 }
 # the ncnn release zips carry every model; only the ones the app uses are shipped
@@ -65,7 +65,7 @@ try {
             if ($r.StatusCode -eq 200) { $ok = $true; break }
         } catch {}
     }
-    if ($ok) { Write-Host "app starts and answers /api/engines" } else { Write-Warning "app did not answer within 30 s — check $env:UPSCALER_DATA_DIR\upscaler.log" }
+    if ($ok) { Write-Host "app starts and answers /api/engines" } else { Write-Warning "app did not answer within 30 s - check $env:UPSCALER_DATA_DIR\upscaler.log" }
 } finally {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     Remove-Item Env:UPSCALER_DATA_DIR
@@ -81,6 +81,6 @@ if ($iscc) {
     & $iscc.Source (Join-Path $RootDir "installer\upscaler.iss")
     Write-Host "installer written to dist\UpscalerSetup.exe"
 } else {
-    Write-Host "Inno Setup not found — skipping installer. dist\Upscaler\ is a complete portable build."
+    Write-Host "Inno Setup not found - skipping installer. dist\Upscaler\ is a complete portable build."
     Write-Host "(winget install JRSoftware.InnoSetup, then re-run to get dist\UpscalerSetup.exe)"
 }

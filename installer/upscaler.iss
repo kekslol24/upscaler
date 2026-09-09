@@ -1,4 +1,4 @@
-; Inno Setup script — compiled by scripts\build_exe.ps1 after PyInstaller.
+; Inno Setup script - compiled by scripts\build_exe.ps1 after PyInstaller.
 ; Installs the one-folder build to Program Files and adds Start Menu /
 ; desktop shortcuts. Job data lives in %LOCALAPPDATA%\Upscaler (see
 ; backend\paths.py), so uninstalling never touches renders.
