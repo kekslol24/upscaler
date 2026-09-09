@@ -3,9 +3,7 @@
 Same weights as the ncnn engine: models/*.onnx are exported from the
 official .pth by scripts/export_onnx.py, and the output matches ncnn's to
 within one 8-bit level. It is several times faster on the same GPU
-because it runs each frame in a few full-width bands instead of 400px
-tiles (whole-frame passes trip a DirectML large-output bug — see
-_MAX_OUTPUT_BYTES), and
+because it runs each frame in a single pass instead of 400px tiles, and
 because it streams: ffmpeg decodes straight into the model and upscaled
 frames go straight into the encoder. Nothing is written to disk in
 between, so decode, upscale and encode overlap and a job never needs
@@ -38,18 +36,24 @@ _GPU_PROVIDERS = ("DmlExecutionProvider", "CUDAExecutionProvider", "ROCMExecutio
 _ALLOW_CPU_ENV = "UPSCALER_ALLOW_CPU"
 _QUEUE_DEPTH = 4
 
-# DirectML silently stops writing the model's output tensor after 12 MiB
-# (measured on an RX 9060 XT: a 3840x2160x3 output comes back with every
-# row past ~1093 black), so frames are processed in full-width horizontal
-# bands whose *output* stays under this many bytes. Bands overlap and the
-# overlap is cropped away, so band output is identical to whole-frame
-# output to within rounding.
-_MAX_OUTPUT_BYTES = int(os.environ.get("UPSCALER_BAND_OUTPUT_BYTES", 10 * 1024 * 1024))
+# Safety valve: frames can be processed in overlapping full-width
+# horizontal bands whose output stays under this many bytes (0 = whole
+# frames, the default). It exists because DirectML truncated the x2/x3
+# graphs' 4x-resolution Pad op at 96 MiB, blacking out the bottom half of
+# every frame; scripts/export_onnx.py now folds that downscale into a small
+# conv so the current models run whole-frame (verified with bench.py on an
+# RX 9060 XT). Set UPSCALER_BAND_OUTPUT_BYTES=10485760 if a future model or
+# driver shows the same symptom; band output matches whole-frame output to
+# within rounding.
+_MAX_OUTPUT_BYTES = int(os.environ.get("UPSCALER_BAND_OUTPUT_BYTES", 0))
 _BAND_OVERLAP = 16
 
 
 def _max_band_rows(width: int, scale: int) -> int:
-    """Input rows per band, overlap included in the budget."""
+    """Input rows per band, overlap included in the budget; a huge number
+    when banding is off."""
+    if _MAX_OUTPUT_BYTES <= 0:
+        return 1 << 30
     rows = _MAX_OUTPUT_BYTES // (scale * scale * width * 3)
     return max(16, rows - 2 * _BAND_OVERLAP)
 
