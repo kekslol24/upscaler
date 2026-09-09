@@ -196,6 +196,20 @@ class Job:
         )
 
 
+@dataclass
+class _Chunk:
+    idx: int
+    dir: Path
+    #: frames read from the source in this chunk
+    n_new: int
+    #: including the carried-over last frame of the previous chunk
+    n_total: int
+    has_carry: bool
+    last: bool
+    #: directory of frames ready for the final stage
+    frames: Path | None = None
+
+
 def _format_eta(seconds: float) -> str:
     seconds = int(seconds)
     if seconds >= 3600:
@@ -479,89 +493,128 @@ class JobManager:
         work = job.dir / "work"
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
-        frame_bytes = info.width * info.height * 3
         frames_per_chunk = max(1, round(CHUNK_SECONDS * info.fps))
-        segments: list[Path] = []
-        carry: bytes | None = None
-        source_done = 0
-        chunk_idx = 0
 
-        reader = pipeline.open_frame_reader(job.input_path, options)
+        def run_upscale(chunk: _Chunk, src: Path, dst: Path, cb) -> None:
+            engine.upscale_frames(src, dst, scale, cb, gpu_id=job.gpu_id)
+
+        def run_interp(chunk: _Chunk, src: Path, dst: Path, cb) -> None:
+            target = (chunk.n_total - 1) * interp.factor + 1
+            interpolator.interpolate_frames(src, dst, target, cb, gpu_id=job.gpu_id)
+            if chunk.has_carry:
+                # first output == carried frame, already emitted by the previous chunk
+                _drop_first_frame(dst)
+            _renumber(dst)
+
+        stages = _stage_order(engine, interpolator, run_upscale, run_interp)
+        # With two stages, the producer thread runs the first one (on the
+        # next chunk) while this thread runs the second (on the current one):
+        # interpolation is mostly PNG I/O and the upscaler is GPU compute, so
+        # they overlap well. Progress/ETA are reported from the final stage.
+        ahead = stages[:-1]
+        final_verb, final_run = stages[-1]
+        # a streaming upscaler as the last stage encodes the segment itself
+        # instead of writing 4K PNGs that get read straight back
+        direct_encode = final_verb == "upscaling" and getattr(engine, "streaming", False)
+
+        ready: "queue.Queue[_Chunk | None]" = queue.Queue(maxsize=1)
+        abort = threading.Event()
+        producer_error: list[BaseException] = []
+
+        def check_cancel(done: int, total: int) -> None:
+            if abort.is_set() or job.cancel_requested.is_set():
+                raise JobCancelled()
+
+        def produce() -> None:
+            reader = pipeline.open_frame_reader(job.input_path, options)
+            frame_bytes = info.width * info.height * 3
+            carry: bytes | None = None
+            idx = 0
+            try:
+                while not abort.is_set():
+                    frames: list[bytes] = []
+                    while len(frames) < frames_per_chunk:
+                        buf = reader.stdout.read(frame_bytes)
+                        if len(buf) < frame_bytes:
+                            break
+                        frames.append(buf)
+                    if not frames:
+                        break
+                    chunk_frames = ([carry] if carry is not None else []) + frames
+                    chunk = _Chunk(
+                        idx=idx, dir=work / f"chunk{idx:04d}", n_new=len(frames),
+                        n_total=len(chunk_frames), has_carry=carry is not None,
+                        last=len(frames) < frames_per_chunk,
+                    )
+                    frames_dir = chunk.dir / "in"
+                    self._write_pngs(frames_dir, chunk_frames, info)
+                    for verb, run in ahead:
+                        # only the very first chunk reports here; afterwards the
+                        # final stage owns the progress line
+                        cb = (lambda d, t, v=verb: progress(chunk.n_new * 0.5 * d / max(t, 1), v)) if idx == 0 else check_cancel
+                        nxt = chunk.dir / verb
+                        run(chunk, frames_dir, nxt, cb)
+                        shutil.rmtree(frames_dir, ignore_errors=True)
+                        frames_dir = nxt
+                    chunk.frames = frames_dir
+                    if abort.is_set():
+                        break
+                    ready.put(chunk)
+                    carry = frames[-1] if interpolator is not None else None
+                    idx += 1
+                    if chunk.last:
+                        break
+                reader.stdout.close()
+                err = reader.stderr.read().decode(errors="replace").strip()
+                if reader.wait() != 0:
+                    raise RuntimeError(f"ffmpeg decode failed ({reader.returncode}): {err}")
+            except BaseException as exc:  # noqa: BLE001 - handed to the consumer
+                producer_error.append(exc)
+                reader.kill()
+                reader.wait()
+            finally:
+                ready.put(None)
+
+        producer = threading.Thread(target=produce, daemon=True)
+        producer.start()
+        segments: list[Path] = []
+        source_done = 0
         try:
             while True:
-                frames: list[bytes] = []
-                while len(frames) < frames_per_chunk:
-                    buf = reader.stdout.read(frame_bytes)
-                    if len(buf) < frame_bytes:
-                        break
-                    frames.append(buf)
-                if not frames:
+                chunk = ready.get()
+                if chunk is None:
                     break
-                last_chunk = len(frames) < frames_per_chunk
-                chunk_frames = ([carry] if carry is not None else []) + frames
-                n_new = len(frames)
+                segment = work / f"seg{chunk.idx:04d}.mp4"
+                n_new = chunk.n_new
 
-                chunk_dir = work / f"chunk{chunk_idx:04d}"
-                frames_in = chunk_dir / "in"
-                self._write_pngs(frames_in, chunk_frames, info)
+                def on_final(done: int, total: int) -> None:
+                    progress(source_done + n_new * 0.95 * done / max(total, 1), final_verb)
 
-                has_carry = carry is not None
-
-                def run_upscale(src: Path, dst: Path, cb) -> None:
-                    engine.upscale_frames(src, dst, scale, cb, gpu_id=job.gpu_id)
-
-                def run_interp(src: Path, dst: Path, cb) -> None:
-                    target = (len(chunk_frames) - 1) * interp.factor + 1
-                    interpolator.interpolate_frames(src, dst, target, cb, gpu_id=job.gpu_id)
-                    if has_carry:
-                        # first output == carried frame, already emitted by the previous chunk
-                        _drop_first_frame(dst)
-                    _renumber(dst)
-
-                stages = _stage_order(engine, interpolator, run_upscale, run_interp)
-                segment = work / f"seg{chunk_idx:04d}.mp4"
-                # a streaming upscaler as the last stage encodes the segment
-                # itself instead of writing 4K PNGs that get read straight back
-                direct_encode = stages[-1][0] == "upscaling" and getattr(engine, "streaming", False)
-                weight = 1.0 / len(stages)
-                current = frames_in
-                for i, (verb, run) in enumerate(stages):
-                    base = source_done + n_new * weight * i
-
-                    def on_stage(done: int, total: int, base=base, verb=verb) -> None:
-                        progress(base + n_new * weight * done / max(total, 1), verb)
-
-                    if direct_encode and i == len(stages) - 1:
-                        engine.upscale_frames_to_video(current, segment, out_rate, scale, on_stage,
-                                                       gpu_id=job.gpu_id, options=options)
-                        shutil.rmtree(current, ignore_errors=True)
-                        current = None
-                        break
-                    nxt = chunk_dir / verb
-                    run(current, nxt, on_stage)
-                    shutil.rmtree(current, ignore_errors=True)
-                    current = nxt
-
-                if current is not None:
+                if direct_encode:
+                    engine.upscale_frames_to_video(chunk.frames, segment, out_rate, scale, on_final,
+                                                   gpu_id=job.gpu_id, options=options)
+                else:
+                    out_dir = chunk.dir / final_verb
+                    final_run(chunk, chunk.frames, out_dir, on_final)
                     progress(source_done + n_new * 0.98, "encoding")
-                    pipeline.reassemble(current, segment, out_rate, None, options)
+                    pipeline.reassemble(out_dir, segment, out_rate, None, options)
                 segments.append(segment)
-                shutil.rmtree(chunk_dir, ignore_errors=True)
-
+                shutil.rmtree(chunk.dir, ignore_errors=True)
                 source_done += n_new
-                progress(source_done, "upscaling" if engine is not None else "interpolating")
-                carry = frames[-1] if interpolator is not None else None
-                chunk_idx += 1
-                if last_chunk:
-                    break
-            reader.stdout.close()
-            err = reader.stderr.read().decode(errors="replace").strip()
-            if reader.wait() != 0:
-                raise RuntimeError(f"ffmpeg decode failed ({reader.returncode}): {err}")
+                progress(source_done, final_verb)
         except BaseException:
-            reader.kill()
-            reader.wait()
+            abort.set()
+            # keep the hand-off queue drained until the producer has exited,
+            # or it blocks on its next put and never sees the abort
+            while producer.is_alive():
+                try:
+                    ready.get(timeout=0.1)
+                except queue.Empty:
+                    pass
             raise
+        producer.join()
+        if producer_error:
+            raise producer_error[0]
 
         if not segments:
             raise RuntimeError("no frames decoded from the source")
