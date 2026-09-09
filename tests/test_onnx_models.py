@@ -39,9 +39,9 @@ def test_banded_inference_matches_whole_frame(scale, monkeypatch):
     name = sess.get_inputs()[0].name
     frame = _gradient_frame(96, 80)
     whole = sess.run(None, {name: frame})[0]
-    # force several bands: 3*16*80 elements per input row → cap at ~32 rows
-    monkeypatch.setattr(engine_mod, "_MAX_INTERMEDIATE_ELEMENTS", 3 * 16 * 80 * 32)
-    assert engine_mod._max_band_rows(80) == 32
+    # budget for 56 input rows of output incl. overlap -> 24-row bands, so 96 rows = 4 bands
+    monkeypatch.setattr(engine_mod, "_MAX_OUTPUT_BYTES", scale * scale * 80 * 3 * 56)
+    assert engine_mod._max_band_rows(80, scale) == 24
     banded = engine_mod._infer_frame(sess, name, frame, scale)
     assert banded.shape == whole.shape
     assert np.abs(banded.astype(int) - whole.astype(int)).max() <= 1

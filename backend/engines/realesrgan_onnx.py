@@ -4,8 +4,8 @@ Same weights as the ncnn engine: models/*.onnx are exported from the
 official .pth by scripts/export_onnx.py, and the output matches ncnn's to
 within one 8-bit level. It is several times faster on the same GPU
 because it runs each frame in a few full-width bands instead of 400px
-tiles (whole-frame passes trip a DirectML large-tensor bug — see
-_MAX_INTERMEDIATE_ELEMENTS), and
+tiles (whole-frame passes trip a DirectML large-output bug — see
+_MAX_OUTPUT_BYTES), and
 because it streams: ffmpeg decodes straight into the model and upscaled
 frames go straight into the encoder. Nothing is written to disk in
 between, so decode, upscale and encode overlap and a job never needs
@@ -38,18 +38,20 @@ _GPU_PROVIDERS = ("DmlExecutionProvider", "CUDAExecutionProvider", "ROCMExecutio
 _ALLOW_CPU_ENV = "UPSCALER_ALLOW_CPU"
 _QUEUE_DEPTH = 4
 
-# DirectML silently zero-fills the tail of very large op outputs (a 1080p
-# frame's x4 intermediate, ~100M elements, comes back with the bottom half
-# black), so frames are processed in full-width horizontal bands sized to
-# keep the biggest intermediate — 3 channels x 4H x 4W after PixelShuffle —
-# under this element count. Bands overlap and the overlap is cropped away,
-# so band output is identical to whole-frame output.
-_MAX_INTERMEDIATE_ELEMENTS = int(os.environ.get("UPSCALER_BAND_ELEMENTS", 32 * 1024 * 1024))
+# DirectML silently stops writing the model's output tensor after 12 MiB
+# (measured on an RX 9060 XT: a 3840x2160x3 output comes back with every
+# row past ~1093 black), so frames are processed in full-width horizontal
+# bands whose *output* stays under this many bytes. Bands overlap and the
+# overlap is cropped away, so band output is identical to whole-frame
+# output to within rounding.
+_MAX_OUTPUT_BYTES = int(os.environ.get("UPSCALER_BAND_OUTPUT_BYTES", 10 * 1024 * 1024))
 _BAND_OVERLAP = 16
 
 
-def _max_band_rows(width: int) -> int:
-    return max(32, _MAX_INTERMEDIATE_ELEMENTS // (3 * 4 * 4 * width))
+def _max_band_rows(width: int, scale: int) -> int:
+    """Input rows per band, overlap included in the budget."""
+    rows = _MAX_OUTPUT_BYTES // (scale * scale * width * 3)
+    return max(16, rows - 2 * _BAND_OVERLAP)
 
 
 def _infer_frame(session, input_name: str, frame, scale: int):
@@ -58,8 +60,8 @@ def _infer_frame(session, input_name: str, frame, scale: int):
     import numpy as np
 
     height, width = frame.shape[1], frame.shape[2]
-    band_rows = _max_band_rows(width)
-    if height <= band_rows:
+    band_rows = _max_band_rows(width, scale)
+    if height <= band_rows + 2 * _BAND_OVERLAP:
         return session.run(None, {input_name: frame})[0]
 
     out = np.empty((1, height * scale, width * scale, 3), dtype=np.uint8)
