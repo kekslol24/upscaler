@@ -9,37 +9,130 @@
   <main>
     <h1>Video Upscaler</h1>
 
-    <section id="uploadSection">
-      <form id="uploadForm">
-        <label class="field">
-          <span>Clip</span>
-          <input type="file" id="fileInput" accept="video/*" required>
-        </label>
+    <section id="sourceSection">
+      <h2>Source</h2>
+      <label class="field">
+        <span>Video file</span>
+        <input type="file" id="fileInput" accept="video/*,.mkv">
+      </label>
+      <p id="sourceInfo" class="hint">Pick a file — it is uploaded straight away so you can preview settings before committing to a full render.</p>
+    </section>
 
+    <section id="settingsSection">
+      <h2>Settings</h2>
+
+      <label class="field">
+        <span>Preset</span>
+        <select id="presetSelect"></select>
+      </label>
+      <p id="presetHint" class="hint"></p>
+
+      <div class="row">
         <label class="field">
           <span>Engine</span>
           <select id="engineSelect" required></select>
         </label>
-
         <label class="field">
           <span>Scale</span>
           <select id="scaleSelect" required></select>
         </label>
-
         <label class="field">
           <span>GPU</span>
           <select id="gpuSelect" required></select>
         </label>
-
-        <button type="submit" id="submitBtn">Upscale</button>
-      </form>
+      </div>
       <p id="engineHint" class="hint"></p>
+
+      <h3>Filters</h3>
+      <div class="row">
+        <label class="field checkbox">
+          <input type="checkbox" id="deinterlaceInput">
+          <span>Deinterlace (bwdif)</span>
+        </label>
+        <label class="field">
+          <span>Denoise before model</span>
+          <select id="denoiseSelect">
+            <option value="0">Off</option>
+            <option value="1">Light</option>
+            <option value="2">Medium</option>
+            <option value="3">Strong</option>
+          </select>
+        </label>
+        <label class="field checkbox">
+          <input type="checkbox" id="sharpenInput">
+          <span>Sharpen after model</span>
+        </label>
+      </div>
+
+      <h3>Frame interpolation</h3>
+      <div class="row">
+        <label class="field">
+          <span>Interpolate</span>
+          <select id="interpFactorSelect">
+            <option value="0">Off</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Mode</span>
+          <select id="interpModeSelect">
+            <option value="smooth">Smooth motion (higher fps, keeps audio)</option>
+            <option value="slowmo">Slow motion (same fps, drops audio)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Model</span>
+          <select id="interpEngineSelect"></select>
+        </label>
+      </div>
+      <p id="interpHint" class="hint"></p>
+
+      <h3>Output</h3>
+      <div class="row">
+        <label class="field">
+          <span>Codec</span>
+          <select id="codecSelect">
+            <option value="h264">H.264 (plays everywhere)</option>
+            <option value="hevc">HEVC (smaller files)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Encoder</span>
+          <select id="encoderSelect"></select>
+        </label>
+        <label class="field">
+          <span>Quality (CRF, lower = better)</span>
+          <input type="number" id="qualityInput" min="10" max="32" value="18">
+        </label>
+      </div>
+      <p id="encoderHint" class="hint"></p>
+    </section>
+
+    <section id="renderSection">
+      <h2>Render</h2>
+      <div class="row">
+        <label class="field">
+          <span>Preview from (seconds)</span>
+          <input type="number" id="previewStartInput" min="0" step="0.5" value="0">
+        </label>
+        <label class="field">
+          <span>Preview length (seconds)</span>
+          <input type="number" id="previewLengthInput" min="1" max="30" step="1" value="5">
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="previewBtn" disabled>Preview clip</button>
+        <button type="button" id="renderBtn" disabled class="secondary">Render full video</button>
+      </div>
+      <p class="hint">A preview renders only the chosen window so you can compare settings in seconds; the full render processes the whole file.</p>
     </section>
 
     <section id="progressSection" hidden>
       <p id="progressMessage">queued</p>
       <div class="progress-bar">
         <div id="progressFill" class="progress-fill"></div>
+      </div>
+      <div class="actions">
+        <button type="button" id="cancelBtn" class="secondary">Cancel</button>
       </div>
     </section>
 
@@ -48,7 +141,7 @@
     </section>
 
     <section id="compareSection" hidden>
-      <h2>Before / After</h2>
+      <h2 id="compareTitle">Before / After</h2>
       <div class="compare-frame" id="compareFrame">
         <video id="videoBefore" class="compare-video" muted playsinline loop></video>
         <video id="videoAfter" class="compare-video compare-video-after" muted playsinline loop></video>
@@ -57,9 +150,19 @@
       </div>
       <div class="compare-controls">
         <button id="playPauseBtn">Play</button>
-        <a id="downloadLink" download>Download upscaled video</a>
+        <a id="downloadLink" download>Download result</a>
       </div>
       <p class="hint">Audio is muted here for comparison — download the result to hear it.</p>
+    </section>
+
+    <section id="jobsSection" hidden>
+      <h2>Recent jobs</h2>
+      <table class="jobs">
+        <thead>
+          <tr><th>File</th><th>Render</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody id="jobsBody"></tbody>
+      </table>
     </section>
   </main>
 

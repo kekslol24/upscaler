@@ -1,6 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
+build/
+dist/
+.pytest_cache/
+data/*
+!data/jobs/
 data/jobs/*
 !data/jobs/.gitkeep
 engines_bin/*

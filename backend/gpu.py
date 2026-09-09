@@ -33,16 +33,26 @@ class GpuInfo:
     device_type: str
 
 
+def _vulkaninfo_binary() -> str | None:
+    # The Vulkan runtime that ships with Windows GPU drivers installs
+    # vulkaninfo.exe; the LunarG SDK adds vulkaninfoSDK.exe. Either works.
+    for name in ("vulkaninfo", "vulkaninfoSDK"):
+        if shutil.which(name) is not None:
+            return name
+    return None
+
+
 def vulkaninfo_available() -> bool:
-    return shutil.which("vulkaninfo") is not None
+    return _vulkaninfo_binary() is not None
 
 
 def list_gpus() -> list[GpuInfo]:
-    if not vulkaninfo_available():
+    binary = _vulkaninfo_binary()
+    if binary is None:
         return []
     try:
         out = subprocess.run(
-            ["vulkaninfo", "--summary"],
+            [binary, "--summary"],
             capture_output=True, text=True, timeout=10, check=True,
         ).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
