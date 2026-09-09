@@ -27,6 +27,23 @@ def _free_port(preferred: int = 8000) -> int:
     return 0
 
 
+def _open_when_ready(url: str, port: int, timeout: float = 60.0) -> None:
+    """Open the browser once the server accepts connections, so the first
+    page load doesn't race the (slower, packaged) startup."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.5)
+            try:
+                s.connect(("127.0.0.1", port))
+                break
+            except OSError:
+                time.sleep(0.25)
+    webbrowser.open(url)
+
+
 def _fatal(message: str) -> None:
     logging.exception(message)
     if sys.platform == "win32":
@@ -63,7 +80,7 @@ def main() -> None:
         return
     url = f"http://127.0.0.1:{port}"
     if "--no-browser" not in sys.argv:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Thread(target=_open_when_ready, args=(url, port), daemon=True).start()
     logging.info("serving on %s", url)
     print(f"Upscaler running at {url} — close this window to stop.", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", log_config=None)
