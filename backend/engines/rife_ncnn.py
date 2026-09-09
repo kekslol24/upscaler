@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+from .. import proc as proc_
 from ..paths import ENGINES_DIR
 from .base import FrameInterpolator, ProgressCallback
 
@@ -77,7 +78,7 @@ class RifeNcnnInterpolator(FrameInterpolator):
             # several times faster, and what it is designed for at that size
             cmd.append("-u")
 
-        proc = subprocess.Popen(
+        proc = proc_.Popen(
             cmd, cwd=ENGINE_DIR,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )

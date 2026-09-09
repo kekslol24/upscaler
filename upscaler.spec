@@ -20,7 +20,7 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 hiddenimports = (
     collect_submodules("uvicorn")
     + ["backend", "backend.main", "backend.jobs", "backend.pipeline", "backend.gpu",
-       "backend.presets", "backend.paths", "backend.engines",
+       "backend.presets", "backend.paths", "backend.proc", "backend.engines",
        "backend.engines.realesrgan_onnx", "backend.engines.realesrgan_ncnn",
        "backend.engines.rife_ncnn",
        "multipart", "python_multipart", "numpy"]

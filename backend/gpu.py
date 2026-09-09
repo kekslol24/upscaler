@@ -15,6 +15,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from . import proc
+
 _VENDOR_IDS = {
     "0x1002": "AMD",
     "0x10de": "NVIDIA",
@@ -51,7 +53,7 @@ def list_gpus() -> list[GpuInfo]:
     if binary is None:
         return []
     try:
-        out = subprocess.run(
+        out = proc.run(
             [binary, "--summary"],
             capture_output=True, text=True, timeout=10, check=True,
         ).stdout

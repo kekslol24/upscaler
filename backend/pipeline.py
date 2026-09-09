@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
+from . import proc
 from .paths import DATA_DIR
 
 
@@ -125,7 +126,7 @@ def _encoder_works(name: str) -> bool:
     actually encode a few frames with it. Hardware encoders reject tiny
     frames, hence a real-ish size."""
     try:
-        proc = subprocess.run(
+        result = proc.run(
             [
                 "ffmpeg", "-v", "error", "-nostdin",
                 "-f", "lavfi", "-i", "color=black:s=640x360:r=10:d=0.3",
@@ -136,13 +137,14 @@ def _encoder_works(name: str) -> bool:
     except (subprocess.TimeoutExpired, OSError) as exc:
         ENCODER_ERRORS[name] = str(exc)
         return False
-    if proc.returncode != 0:
-        ENCODER_ERRORS[name] = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else f"exit {proc.returncode}"
-    return proc.returncode == 0
+    if result.returncode != 0:
+        err = result.stderr.strip()
+        ENCODER_ERRORS[name] = err.splitlines()[-1] if err else f"exit {result.returncode}"
+    return result.returncode == 0
 
 
 def _ffmpeg_version() -> str:
-    return subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True).stdout.splitlines()[0]
+    return proc.run(["ffmpeg", "-version"], capture_output=True, text=True).stdout.splitlines()[0]
 
 
 @functools.lru_cache(maxsize=1)
@@ -164,7 +166,7 @@ def available_encoders() -> list[str]:
     except (OSError, ValueError, KeyError):
         pass
 
-    listed = subprocess.run(
+    listed = proc.run(
         ["ffmpeg", "-v", "error", "-hide_banner", "-encoders"],
         capture_output=True, text=True,
     ).stdout
@@ -226,7 +228,7 @@ _MP4_SAFE_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 
 def _audio_args(audio_source: Path) -> list[str]:
     try:
-        codec = subprocess.run(
+        codec = proc.run(
             [
                 "ffprobe", "-v", "error", "-select_streams", "a:0",
                 "-show_entries", "stream=codec_name",
@@ -292,7 +294,7 @@ def _parse_frame_rate(rate: str) -> float:
 
 def probe(input_path: Path) -> VideoInfo:
     _require_ffmpeg()
-    out = subprocess.run(
+    out = proc.run(
         [
             "ffprobe", "-v", "error",
             "-print_format", "json",
@@ -328,7 +330,7 @@ def extract_frames(
     _require_ffmpeg()
     options = options or RenderOptions()
     frames_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    proc.run(
         [
             "ffmpeg", "-y", "-v", "error",
             *_clip_input_args(options.clip),
@@ -371,7 +373,7 @@ def reassemble(
         cmd += ["-map", "1:a"] + _audio_args(audio_source)
 
     cmd += encode_args(options.encode, output_path.suffix.lstrip(".")) + [str(output_path)]
-    subprocess.run(cmd, check=True)
+    proc.run(cmd, check=True)
 
 
 def concat_segments(
@@ -396,7 +398,7 @@ def concat_segments(
         cmd += ["-tag:v", "hvc1"]
     cmd.append(str(output_path))
     try:
-        subprocess.run(cmd, check=True)
+        proc.run(cmd, check=True)
     finally:
         list_file.unlink(missing_ok=True)
 
@@ -412,7 +414,7 @@ def open_frame_reader(
     with options.clip and pre-filters applied."""
     _require_ffmpeg()
     options = options or RenderOptions()
-    return subprocess.Popen(
+    return proc.Popen(
         [
             "ffmpeg", "-v", "error",
             *_clip_input_args(options.clip),
@@ -454,13 +456,13 @@ def open_frame_writer(
         cmd += _vf_args(options.filters.post())
         cmd += encode_args(options.encode, target.suffix.lstrip("."))
     cmd.append(str(target))
-    return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    return proc.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def is_browser_playable(input_path: Path) -> bool:
     """8-bit H.264 in MP4/MOV is the one combination every browser plays."""
     try:
-        out = subprocess.run(
+        out = proc.run(
             [
                 "ffprobe", "-v", "error", "-select_streams", "v:0",
                 "-show_entries", "stream=codec_name,pix_fmt:format=format_name",
@@ -485,7 +487,7 @@ def make_proxy(input_path: Path, output_path: Path, clip: Clip | None = None) ->
     it) for the before/after view — the upload itself may be 10-bit HEVC
     in an MKV, which no browser plays."""
     _require_ffmpeg()
-    subprocess.run(
+    proc.run(
         [
             "ffmpeg", "-y", "-v", "error",
             *_clip_input_args(clip),

@@ -25,6 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .. import proc as proc_
 from ..paths import ENGINES_DIR
 from .base import ProgressCallback, UpscaleEngine
 
@@ -90,7 +91,7 @@ class RealEsrganNcnnEngine(UpscaleEngine):
         if gpu_id is not None:
             cmd += ["-g", str(gpu_id)]
 
-        proc = subprocess.Popen(
+        proc = proc_.Popen(
             cmd,
             cwd=ENGINE_DIR,
             stdout=subprocess.PIPE,
