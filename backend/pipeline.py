@@ -114,20 +114,30 @@ ENCODER_LABELS = {
 }
 
 
+#: why each candidate encoder failed its test encode (for diagnostics)
+ENCODER_ERRORS: dict[str, str] = {}
+#: bump when the test encode changes so stale cached results are redone
+_ENCODER_PROBE_VERSION = 2
+
+
 def _encoder_works(name: str) -> bool:
     """A listed encoder is not a usable one (the driver may be missing), so
-    actually encode a few tiny frames with it."""
+    actually encode a few frames with it. Hardware encoders reject tiny
+    frames, hence a real-ish size."""
     try:
         proc = subprocess.run(
             [
                 "ffmpeg", "-v", "error", "-nostdin",
-                "-f", "lavfi", "-i", "color=black:s=64x64:r=10:d=0.3",
+                "-f", "lavfi", "-i", "color=black:s=640x360:r=10:d=0.3",
                 "-c:v", name, "-pix_fmt", "yuv420p", "-f", "null", "-",
             ],
-            capture_output=True, timeout=30,
+            capture_output=True, text=True, timeout=30,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        ENCODER_ERRORS[name] = str(exc)
         return False
+    if proc.returncode != 0:
+        ENCODER_ERRORS[name] = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else f"exit {proc.returncode}"
     return proc.returncode == 0
 
 
@@ -145,7 +155,7 @@ def available_encoders() -> list[str]:
     """
     if not ffmpeg_available():
         return []
-    version = _ffmpeg_version()
+    version = f"{_ffmpeg_version()} / probe {_ENCODER_PROBE_VERSION}"
     cache_path = DATA_DIR / "encoders.json"
     try:
         cached = json.loads(cache_path.read_text())

@@ -519,6 +519,10 @@ class JobManager:
                     _renumber(dst)
 
                 stages = _stage_order(engine, interpolator, run_upscale, run_interp)
+                segment = work / f"seg{chunk_idx:04d}.mp4"
+                # a streaming upscaler as the last stage encodes the segment
+                # itself instead of writing 4K PNGs that get read straight back
+                direct_encode = stages[-1][0] == "upscaling" and getattr(engine, "streaming", False)
                 weight = 1.0 / len(stages)
                 current = frames_in
                 for i, (verb, run) in enumerate(stages):
@@ -527,15 +531,20 @@ class JobManager:
                     def on_stage(done: int, total: int, base=base, verb=verb) -> None:
                         progress(base + n_new * weight * done / max(total, 1), verb)
 
+                    if direct_encode and i == len(stages) - 1:
+                        engine.upscale_frames_to_video(current, segment, out_rate, scale, on_stage,
+                                                       gpu_id=job.gpu_id, options=options)
+                        shutil.rmtree(current, ignore_errors=True)
+                        current = None
+                        break
                     nxt = chunk_dir / verb
                     run(current, nxt, on_stage)
                     shutil.rmtree(current, ignore_errors=True)
                     current = nxt
-                frames_out = current
 
-                progress(source_done + n_new * 0.98, "encoding")
-                segment = work / f"seg{chunk_idx:04d}.mp4"
-                pipeline.reassemble(frames_out, segment, out_rate, None, options)
+                if current is not None:
+                    progress(source_done + n_new * 0.98, "encoding")
+                    pipeline.reassemble(current, segment, out_rate, None, options)
                 segments.append(segment)
                 shutil.rmtree(chunk_dir, ignore_errors=True)
 

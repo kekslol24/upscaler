@@ -44,7 +44,7 @@ _QUEUE_DEPTH = 4
 # keep the biggest intermediate — 3 channels x 4H x 4W after PixelShuffle —
 # under this element count. Bands overlap and the overlap is cropped away,
 # so band output is identical to whole-frame output.
-_MAX_INTERMEDIATE_ELEMENTS = 32 * 1024 * 1024
+_MAX_INTERMEDIATE_ELEMENTS = int(os.environ.get("UPSCALER_BAND_ELEMENTS", 32 * 1024 * 1024))
 _BAND_OVERLAP = 16
 
 
@@ -279,15 +279,43 @@ class RealEsrganOnnxEngine(UpscaleEngine):
         gpu_id: int | None = None,
     ) -> None:
         """Directory mode, same streaming core over PNG sequences."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._upscale_sequence(in_dir, out_dir / "%08d.png", "1", scale, on_progress, gpu_id)
+
+    def upscale_frames_to_video(
+        self,
+        in_dir: Path,
+        output_path: Path,
+        frame_rate: str,
+        scale: int,
+        on_progress: ProgressCallback,
+        gpu_id: int | None = None,
+        options: RenderOptions | None = None,
+    ) -> None:
+        """Directory in, encoded video out (no audio): lets the chunked
+        pipeline skip writing and re-reading upscaled 4K PNGs when this
+        engine is the last stage."""
+        self._upscale_sequence(in_dir, output_path, frame_rate, scale, on_progress, gpu_id, options)
+
+    def _upscale_sequence(
+        self,
+        in_dir: Path,
+        target: Path,
+        frame_rate: str,
+        scale: int,
+        on_progress: ProgressCallback,
+        gpu_id: int | None,
+        options: RenderOptions | None = None,
+    ) -> None:
         frames = sorted(p for p in in_dir.iterdir() if p.suffix == ".png")
         if not frames:
             raise RuntimeError(f"no PNG frames in {in_dir}")
         info = pipeline.probe(frames[0])
-        out_dir.mkdir(parents=True, exist_ok=True)
         session = self._session(scale, gpu_id)
         reader = pipeline.open_frame_reader(in_dir / "%08d.png")
         writer = pipeline.open_frame_writer(
-            out_dir / "%08d.png", info.width * scale, info.height * scale, "1",
+            target, info.width * scale, info.height * scale, frame_rate,
+            options=RenderOptions(filters=options.filters, encode=options.encode) if options else None,
         )
         done = self._run_stream(session, reader, writer, info.width, info.height,
                                 scale, len(frames), on_progress)

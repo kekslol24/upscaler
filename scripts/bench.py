@@ -86,14 +86,29 @@ def bench_model(frames: list[bytes]) -> np.ndarray | None:
     name = session.get_inputs()[0].name
     arr = [np.frombuffer(f, dtype=np.uint8).reshape(1, H, W, 3) for f in frames]
     n = len(arr) if provider != "CPUExecutionProvider" else 2
-    session.run(None, {name: arr[0]})  # warm-up / kernel compile
+    whole = session.run(None, {name: arr[0]})[0]  # warm-up / kernel compile
     t = timed(lambda: [session.run(None, {name: a}) for a in arr[:n]])
-    report(f"ONNX upscaler x2, whole frame ({provider})", n / t)
-    onnx_mod._infer_frame(session, name, arr[0], 2)
-    t = timed(lambda: [onnx_mod._infer_frame(session, name, a, 2) for a in arr[:n]])
-    report(f"ONNX upscaler x2, banded ({provider})", n / t,
-           f"bands of {onnx_mod._max_band_rows(W)} rows (the production path)")
-    return onnx_mod._infer_frame(session, name, arr[0], 2)
+    black = int((whole[0].max(axis=(1, 2)) == 0).sum())
+    report(f"ONNX upscaler x2, whole frame ({provider})", n / t,
+           "output OK" if black == 0 else f"OUTPUT CORRUPT: {black} black rows")
+    reference = onnx_mod._infer_frame(session, name, arr[0], 2)
+    for cap_m in (32, 48, 64, 96):
+        cap = cap_m * 1024 * 1024
+        rows_ = max(32, cap // (48 * W))
+        if rows_ >= H and cap_m != 96:
+            continue
+        original = onnx_mod._MAX_INTERMEDIATE_ELEMENTS
+        onnx_mod._MAX_INTERMEDIATE_ELEMENTS = cap
+        try:
+            out = onnx_mod._infer_frame(session, name, arr[0], 2)
+            t = timed(lambda: [onnx_mod._infer_frame(session, name, a, 2) for a in arr[:n]])
+        finally:
+            onnx_mod._MAX_INTERMEDIATE_ELEMENTS = original
+        diff = int(np.abs(out.astype(np.int16) - reference.astype(np.int16)).max())
+        tag = "default" if cap == original else f"UPSCALER_BAND_ELEMENTS={cap}"
+        report(f"ONNX upscaler x2, bands of {min(rows_, H)} rows", n / t,
+               f"{tag}; {'output OK' if diff <= 1 else f'OUTPUT DIFFERS (max diff {diff})'}")
+    return reference
 
 
 def bench_encoders(tmp: Path, frame4k: np.ndarray | None, count: int) -> None:
@@ -171,7 +186,10 @@ def main() -> None:
     try:
         print(f"benchmark, scratch dir {tmp}")
         print(f"ffmpeg: {pipeline._ffmpeg_version()}")
+        pipeline.available_encoders.cache_clear()
         print(f"working encoders: {pipeline.available_encoders()}")
+        for name, err in pipeline.ENCODER_ERRORS.items():
+            print(f"  {name} failed: {err}")
         try:
             import onnxruntime as ort
             print(f"onnxruntime {ort.__version__}, providers {ort.get_available_providers()}")
