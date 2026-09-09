@@ -72,6 +72,10 @@ class RifeNcnnInterpolator(FrameInterpolator):
         ]
         if gpu_id is not None:
             cmd += ["-g", str(gpu_id)]
+        if _frame_pixels(in_dir) > _UHD_THRESHOLD:
+            # the binary's half-resolution flow mode for 4K-class frames —
+            # several times faster, and what it is designed for at that size
+            cmd.append("-u")
 
         proc = subprocess.Popen(
             cmd, cwd=ENGINE_DIR,
@@ -95,6 +99,25 @@ class RifeNcnnInterpolator(FrameInterpolator):
         if written != target_count:
             raise RuntimeError(f"rife-ncnn-vulkan wrote {written} frames, expected {target_count}")
         on_progress(target_count, target_count)
+
+
+#: above 1080p-ish, use UHD mode
+_UHD_THRESHOLD = 1920 * 1080 * 1.5
+
+
+def _frame_pixels(directory: Path) -> int:
+    """Width x height of the first PNG, straight from its IHDR header."""
+    try:
+        first = next(p for p in sorted(os.scandir(directory), key=lambda e: e.name) if p.name.endswith(".png"))
+        with open(first.path, "rb") as f:
+            header = f.read(24)
+    except (StopIteration, OSError):
+        return 0
+    if header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return 0
+    width = int.from_bytes(header[16:20], "big")
+    height = int.from_bytes(header[20:24], "big")
+    return width * height
 
 
 def _count_pngs(directory: Path) -> int:

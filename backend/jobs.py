@@ -505,34 +505,33 @@ class JobManager:
                 frames_in = chunk_dir / "in"
                 self._write_pngs(frames_in, chunk_frames, info)
 
-                # progress within the chunk: upscaling is most of the work
-                up_weight = 0.75 if (engine is not None and interpolator is not None) else 1.0
+                has_carry = carry is not None
 
-                def on_upscale(done: int, total: int) -> None:
-                    progress(source_done + n_new * up_weight * done / max(total, 1), "upscaling")
+                def run_upscale(src: Path, dst: Path, cb) -> None:
+                    engine.upscale_frames(src, dst, scale, cb, gpu_id=job.gpu_id)
 
-                def on_interp(done: int, total: int) -> None:
-                    progress(source_done + n_new * (up_weight + (1 - up_weight) * done / max(total, 1)),
-                             "interpolating")
-
-                if engine is not None:
-                    frames_up = chunk_dir / "up"
-                    engine.upscale_frames(frames_in, frames_up, scale, on_upscale, gpu_id=job.gpu_id)
-                    shutil.rmtree(frames_in, ignore_errors=True)
-                else:
-                    frames_up = frames_in
-
-                if interpolator is not None:
-                    frames_out = chunk_dir / "interp"
+                def run_interp(src: Path, dst: Path, cb) -> None:
                     target = (len(chunk_frames) - 1) * interp.factor + 1
-                    interpolator.interpolate_frames(frames_up, frames_out, target, on_interp, gpu_id=job.gpu_id)
-                    shutil.rmtree(frames_up, ignore_errors=True)
-                    if carry is not None:
+                    interpolator.interpolate_frames(src, dst, target, cb, gpu_id=job.gpu_id)
+                    if has_carry:
                         # first output == carried frame, already emitted by the previous chunk
-                        _drop_first_frame(frames_out)
-                    _renumber(frames_out)
-                else:
-                    frames_out = frames_up
+                        _drop_first_frame(dst)
+                    _renumber(dst)
+
+                stages = _stage_order(engine, interpolator, run_upscale, run_interp)
+                weight = 1.0 / len(stages)
+                current = frames_in
+                for i, (verb, run) in enumerate(stages):
+                    base = source_done + n_new * weight * i
+
+                    def on_stage(done: int, total: int, base=base, verb=verb) -> None:
+                        progress(base + n_new * weight * done / max(total, 1), verb)
+
+                    nxt = chunk_dir / verb
+                    run(current, nxt, on_stage)
+                    shutil.rmtree(current, ignore_errors=True)
+                    current = nxt
+                frames_out = current
 
                 progress(source_done + n_new * 0.98, "encoding")
                 segment = work / f"seg{chunk_idx:04d}.mp4"
@@ -591,6 +590,22 @@ class JobManager:
             job.message = "preparing browser-playable copy of the source"
             pipeline.make_proxy(job.input_path, proxy)
         return proxy
+
+
+def _stage_order(engine, interpolator, run_upscale, run_interp) -> list[tuple[str, Callable]]:
+    """Which comes first, upscaling or interpolation.
+
+    Interpolation cost scales with pixel count, upscaling with frame count.
+    With a fast (streaming) upscaler it is much cheaper to interpolate at
+    source resolution and upscale the extra frames than to run RIFE on 4K
+    frames; with the slow Vulkan upscalers doubling its frame count costs
+    more than interpolating at output resolution does.
+    """
+    up = ("upscaling", run_upscale) if engine is not None else None
+    ip = ("interpolating", run_interp) if interpolator is not None else None
+    if up and ip:
+        return [ip, up] if engine.streaming else [up, ip]
+    return [s for s in (up, ip) if s]
 
 
 def _sorted_pngs(directory: Path) -> list[Path]:

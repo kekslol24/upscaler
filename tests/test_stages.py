@@ -31,6 +31,7 @@ class BlendInterpolator(FrameInterpolator):
 
     def __init__(self):
         self.calls: list[tuple[int, int]] = []
+        self.frame_pixels: list[int] = []
 
     def is_available(self):
         return True
@@ -38,6 +39,7 @@ class BlendInterpolator(FrameInterpolator):
     def interpolate_frames(self, in_dir, out_dir, target_count, on_progress, gpu_id=None):
         frames = sorted(p for p in in_dir.iterdir() if p.suffix == ".png")
         self.calls.append((len(frames), target_count))
+        self.frame_pixels.append(rife_ncnn._frame_pixels(in_dir))
         out_dir.mkdir(parents=True, exist_ok=True)
         span = len(frames) - 1
         for i in range(target_count):
@@ -138,6 +140,15 @@ def test_upscale_then_interpolate_via_chunked_path(manager, tiny_video, fake_int
     assert (info.width, info.height) == (128, 96)
     assert _video_packets(job.output_path) == 23
     assert job.output_filename == "tiny_x2_smooth2x.mp4"
+    # a streaming (fast) upscaler means interpolation ran first, at source resolution
+    assert set(fake_interpolator.frame_pixels) == {64 * 48}
+
+
+def test_png_header_size_probe(tmp_path, tiny_video):
+    frames = tmp_path / "f"
+    pipeline.extract_frames(tiny_video, frames, pipeline.RenderOptions(clip=pipeline.Clip(0, 0.25)))
+    assert rife_ncnn._frame_pixels(frames) == 64 * 48
+    assert rife_ncnn._frame_pixels(tmp_path / "missing") == 0
 
 
 def test_start_rejects_nothing_to_do_and_bad_factor(manager, tiny_video, fake_interpolator):
