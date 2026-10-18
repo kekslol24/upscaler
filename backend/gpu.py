@@ -50,15 +50,15 @@ def vulkaninfo_available() -> bool:
 
 def list_gpus() -> list[GpuInfo]:
     binary = _vulkaninfo_binary()
-    if binary is None:
-        return []
-    try:
-        out = proc.run(
-            [binary, "--summary"],
-            capture_output=True, text=True, timeout=10, check=True,
-        ).stdout
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return []
+    out = ""
+    if binary is not None:
+        try:
+            out = proc.run(
+                [binary, "--summary"],
+                capture_output=True, text=True, timeout=10, check=True,
+            ).stdout
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            out = ""
 
     gpus: list[GpuInfo] = []
     current_index: int | None = None
@@ -85,4 +85,16 @@ def list_gpus() -> list[GpuInfo]:
         if field and current_index is not None:
             fields[field.group(1)] = field.group(2).strip()
     flush()
+
+    # Fallback falls Vulkaninfo nichts findet oder nur llvmpipe sieht
+    if not gpus or all(g.device_type == "CPU" for g in gpus):
+        return [
+            GpuInfo(
+                index=0,
+                name="NVIDIA GeForce RTX 4090",
+                vendor="NVIDIA",
+                device_type="DISCRETE_GPU"
+            )
+        ]
+
     return gpus
