@@ -27,7 +27,7 @@ class StartJobRequest(BaseModel):
 @app.get("/api/gpus")
 def list_gpus():
     return {
-        "detectable": gpu.vulkaninfo_available(),
+        "detectable": gpu.detection_available(),
         "gpus": [
             {"index": g.index, "name": g.name, "vendor": g.vendor, "type": g.device_type}
             for g in gpu.list_gpus()

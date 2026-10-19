@@ -374,7 +374,7 @@ class JobManager:
         if gpu_id is not None:
             known_gpus = gpu.list_gpus()
             if known_gpus and gpu_id not in {g.index for g in known_gpus}:
-                raise ValueError(f"no Vulkan GPU with index {gpu_id}")
+                raise ValueError(f"no GPU with index {gpu_id}")
 
         clip = options.get("clip")
         if clip:

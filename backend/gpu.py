@@ -1,15 +1,23 @@
-"""Vulkan GPU detection via `vulkaninfo --summary`, so the GUI can offer
-a GPU picker instead of always leaving device selection to ncnn's
-default (which isn't guaranteed to pick the discrete GPU on a hybrid
-system).
+"""GPU detection for the GPU picker.
 
-ncnn-vulkan tools take a `-g <index>` flag whose index follows the same
-Vulkan physical-device enumeration order vulkaninfo lists here, so the
-indices we report line up with what the engine expects.
+Two sources are consulted:
+
+- `vulkaninfo --summary`: the ncnn-vulkan binaries take a `-g <index>`
+  flag whose index follows Vulkan's physical-device enumeration order,
+  so those indices are what the Vulkan engines expect.
+- `nvidia-smi`: the ONNX Runtime CUDA provider numbers devices in CUDA
+  order (honouring CUDA_VISIBLE_DEVICES), which is what `device_id`
+  expects. This is also the only detection available on headless Linux
+  containers (RunPod and friends), where there is no Vulkan driver.
+
+A real Vulkan GPU wins when there is one, because that list is already
+what the Vulkan engines use. Otherwise the NVIDIA list is used, so the
+ONNX/CUDA engine can be selected on machines without Vulkan.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -35,6 +43,13 @@ class GpuInfo:
     device_type: str
 
 
+@dataclass
+class _NvidiaGpu:
+    index: int
+    name: str
+    uuid: str
+
+
 def _vulkaninfo_binary() -> str | None:
     # The Vulkan runtime that ships with Windows GPU drivers installs
     # vulkaninfo.exe; the LunarG SDK adds vulkaninfoSDK.exe. Either works.
@@ -44,11 +59,21 @@ def _vulkaninfo_binary() -> str | None:
     return None
 
 
+def _nvidia_smi_binary() -> str | None:
+    return shutil.which("nvidia-smi")
+
+
 def vulkaninfo_available() -> bool:
     return _vulkaninfo_binary() is not None
 
 
-def list_gpus() -> list[GpuInfo]:
+def detection_available() -> bool:
+    """True if either backend tool is installed, so the picker can be
+    populated. An empty list with detection on means "no GPU found"."""
+    return vulkaninfo_available() or _nvidia_smi_binary() is not None
+
+
+def _list_vulkan_gpus() -> list[GpuInfo]:
     binary = _vulkaninfo_binary()
     out = ""
     if binary is not None:
@@ -57,7 +82,7 @@ def list_gpus() -> list[GpuInfo]:
                 [binary, "--summary"],
                 capture_output=True, text=True, timeout=10, check=True,
             ).stdout
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             out = ""
 
     gpus: list[GpuInfo] = []
@@ -85,16 +110,77 @@ def list_gpus() -> list[GpuInfo]:
         if field and current_index is not None:
             fields[field.group(1)] = field.group(2).strip()
     flush()
-
-    # Fallback falls Vulkaninfo nichts findet oder nur llvmpipe sieht
-    if not gpus or all(g.device_type == "CPU" for g in gpus):
-        return [
-            GpuInfo(
-                index=0,
-                name="NVIDIA GeForce RTX 4090",
-                vendor="NVIDIA",
-                device_type="DISCRETE_GPU"
-            )
-        ]
-
     return gpus
+
+
+def _nvidia_gpus() -> list[_NvidiaGpu]:
+    binary = _nvidia_smi_binary()
+    if binary is None:
+        return []
+    try:
+        out = proc.run(
+            [binary, "--query-gpu=index,name,uuid", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+
+    gpus: list[_NvidiaGpu] = []
+    for line in out.splitlines():
+        parts = [part.strip() for part in line.split(",", 2)]
+        if len(parts) != 3 or not parts[0].isdigit():
+            continue
+        gpus.append(_NvidiaGpu(int(parts[0]), parts[1], parts[2]))
+    return gpus
+
+
+def _visible_nvidia_gpus(gpus: list[_NvidiaGpu]) -> list[_NvidiaGpu]:
+    """Apply CUDA_VISIBLE_DEVICES so the reported index matches the
+    logical CUDA device number onnxruntime's device_id expects."""
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None or not raw.strip():
+        return gpus
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts or parts == ["-1"]:
+        return []
+    by_index = {str(g.index): g for g in gpus}
+    by_uuid = {g.uuid.lower(): g for g in gpus}
+    selected: list[_NvidiaGpu] = []
+    for part in parts:
+        match = by_index.get(part) or by_uuid.get(part.lower())
+        if match is None and not part.isdigit():
+            # CUDA also accepts abbreviated UUIDs (GPU-xxx)
+            match = next(
+                (g for g in gpus if g.uuid.lower().startswith(part.lower())),
+                None,
+            )
+        if match is not None:
+            selected.append(match)
+    return selected
+
+
+def _list_nvidia_gpus() -> list[GpuInfo]:
+    gpus = _visible_nvidia_gpus(_nvidia_gpus())
+    return [
+        GpuInfo(
+            index=index,
+            name=gpu.name,
+            vendor="NVIDIA",
+            device_type="DISCRETE_GPU",
+        )
+        for index, gpu in enumerate(gpus)
+    ]
+
+
+def list_gpus() -> list[GpuInfo]:
+    vulkan = _list_vulkan_gpus()
+    if any(g.device_type in ("DISCRETE_GPU", "INTEGRATED_GPU") for g in vulkan):
+        return vulkan
+
+    nvidia = _list_nvidia_gpus()
+    if nvidia:
+        return nvidia
+
+    # No hardware backend: expose whatever Vulkan reported (possibly the
+    # llvmpipe CPU device) rather than inventing a GPU that isn't there.
+    return vulkan

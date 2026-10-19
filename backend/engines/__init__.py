@@ -21,7 +21,7 @@ REGISTRY: dict[str, UpscaleEngine] = {
     for engine in [
         RealEsrganOnnxEngine(
             name="realesrgan-animevideov3-onnx",
-            label="Real-ESRGAN — anime video (fast, DirectML)",
+            label="Real-ESRGAN — anime video (fast, DirectML/CUDA)",
             model_prefix="realesr-animevideov3",
             description="Same model and output as the Vulkan engine, several times faster: whole-frame GPU inference, streamed straight between decoder and encoder.",
             supported_scales=(2, 3, 4),

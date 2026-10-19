@@ -162,9 +162,9 @@ async function loadGpus() {
     gpuSelect.appendChild(opt);
   }
   if (!detectable) {
-    gpuSelect.title = "vulkaninfo not found — install vulkan-tools to see specific GPUs";
+    gpuSelect.title = "GPU detection unavailable — install vulkan-tools or use an NVIDIA GPU with nvidia-smi";
   } else if (gpus.length === 0) {
-    gpuSelect.title = "no Vulkan-capable GPU detected";
+    gpuSelect.title = "no GPU detected";
   }
 }
 

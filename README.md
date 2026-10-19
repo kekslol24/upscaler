@@ -13,10 +13,12 @@ Two engines run the same Real-ESRGAN anime-video model:
 
 ## Setup
 
-The upscaler runs on whatever GPU Vulkan can see, so run it natively on the
-OS that owns the GPU. In particular, do not run it inside WSL2: Ubuntu's
-Mesa has no Vulkan-on-D3D12 driver, so Vulkan there only sees the
-`llvmpipe` CPU fallback.
+On Windows the ONNX engine uses DirectML; on Linux with an NVIDIA GPU it uses
+CUDA (installed by `scripts/setup.sh`). The Vulkan engines cover AMD/Intel
+GPUs and run on whatever Vulkan can see, so run them natively on the OS that
+owns the GPU. In particular, do not run them inside WSL2: Ubuntu's Mesa has
+no Vulkan-on-D3D12 driver, so Vulkan there only sees the `llvmpipe` CPU
+fallback.
 
 ### Windows
 
@@ -40,7 +42,36 @@ before starting the server so it is on PATH.
 
 This installs `ffmpeg`/Vulkan via pacman or apt, creates a Python venv,
 installs Python deps, and downloads the Real-ESRGAN ncnn-vulkan engine binary
-(runs on Intel/AMD/NVIDIA GPUs via Vulkan — no CUDA needed).
+(runs on Intel/AMD/NVIDIA GPUs via Vulkan — no CUDA needed). When an NVIDIA
+GPU is present it also installs `onnxruntime-gpu`, so the fast ONNX engine
+runs on CUDA and a GPU smoke test is performed. Pass `--with-vulkan` or
+`--skip-vulkan` to override the automatic Vulkan download decision.
+
+### RunPod / headless GPU containers
+
+On a RunPod pod using a **PyTorch** template:
+
+```bash
+./scripts/setup.sh
+./scripts/run.sh
+```
+
+`setup.sh` detects the NVIDIA GPU, installs ffmpeg and the venv, and installs
+`onnxruntime-gpu` matching the image's CUDA version (CUDA 12.x templates work
+without any CUDA/cuDNN setup). It skips the ncnn/Vulkan binaries unless
+Vulkan sees a real GPU, since containers normally have no Vulkan ICD. It ends
+with a real x2 inference on the GPU, so a CUDA/cuDNN mismatch fails at setup
+time instead of in the middle of a render.
+
+`run.sh` listens on `0.0.0.0:8000` and, when `/workspace` exists, keeps job
+data in `/workspace/upscaler-data` (survives pod restarts). Keep the project
+itself on `/workspace` too, so the venv and downloaded engines persist. Expose
+**8000** as an HTTP port in the pod settings, then open the pod's proxy URL.
+Override with `UVICORN_HOST`/`UVICORN_PORT`, and set `UPSCALER_DATA_DIR` if
+the volume is mounted elsewhere.
+
+If the pod template is not CUDA 12.x, pick one that is (the ORT GPU wheel
+needs the matching CUDA/cuDNN), or use an image that ships PyTorch.
 
 ## Run
 
@@ -112,7 +143,7 @@ every frame pair.
 
 | Engine | Runs on | Good for |
 |---|---|---|
-| Real-ESRGAN anime video (DirectML) | ONNX Runtime, streaming | anime, fastest |
+| Real-ESRGAN anime video (DirectML/CUDA) | ONNX Runtime, streaming | anime, fastest |
 | Real-ESRGAN anime video (Vulkan) | ncnn binary | anime, any GPU/OS |
 | Real-ESRGAN anime, max detail | ncnn binary | anime stills model, crispest lines |
 | Real-ESRGAN live action / general | ncnn binary | real footage, 4x only, slow |

@@ -1,30 +1,90 @@
 #!/usr/bin/env bash
-# Installs system deps, sets up the Python venv, and downloads the
-# realesrgan-ncnn-vulkan engine binary + models.
-# Supports Arch (pacman) and Ubuntu/Debian incl. WSL2 (apt).
+# Installs system deps, sets up the Python venv, enables GPU inference and
+# downloads the Vulkan engine binaries when the machine can actually run them.
+#
+# Works on Arch, Ubuntu/Debian (incl. WSL2) and headless GPU containers such
+# as RunPod's PyTorch image. Safe to re-run.
+#
+# Usage:
+#   ./scripts/setup.sh                 # auto: CUDA if NVIDIA, Vulkan if usable
+#   ./scripts/setup.sh --with-vulkan   # also download the ncnn/RIFE binaries
+#   ./scripts/setup.sh --skip-vulkan   # never download them
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+WITH_VULKAN=auto
+for arg in "$@"; do
+  case "$arg" in
+    --with-vulkan) WITH_VULKAN=yes ;;
+    --skip-vulkan) WITH_VULKAN=no ;;
+    -h|--help)
+      echo "usage: $0 [--with-vulkan|--skip-vulkan]"
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+  else
+    echo "error: not running as root and sudo is not installed; re-run as root." >&2
+    exit 1
+  fi
+fi
+
+PYTHON=python3
+command -v python3 >/dev/null 2>&1 || PYTHON=python
 
 IS_WSL=false
 if grep -qi microsoft /proc/version 2>/dev/null; then
   IS_WSL=true
 fi
 
-echo "== System packages (ffmpeg + Vulkan driver + vulkan-tools for GPU detection) =="
-if command -v pacman >/dev/null; then
-  sudo pacman -S --needed ffmpeg vulkan-icd-loader vulkan-tools vulkan-radeon unzip
-elif command -v apt-get >/dev/null; then
+HAS_NVIDIA=false
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  HAS_NVIDIA=true
+fi
+
+if $HAS_NVIDIA; then
+  GPU_LINE="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+  echo "== NVIDIA GPU: ${GPU_LINE:-detected} =="
+fi
+
+echo "== System packages (ffmpeg + unzip + Vulkan loader/tools) =="
+if command -v pacman >/dev/null 2>&1; then
+  $SUDO pacman -S --needed --noconfirm ffmpeg unzip curl python python-pip vulkan-icd-loader vulkan-tools
+  if ! $HAS_NVIDIA; then
+    $SUDO pacman -S --needed --noconfirm vulkan-radeon || true
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
   # Note: on WSL2 Ubuntu's Mesa does not ship the Dozen (Vulkan-on-D3D12)
   # driver, so Vulkan only sees the llvmpipe CPU fallback there. For GPU
   # acceleration on a Windows machine run the project natively on Windows
   # with scripts/setup.ps1 instead.
-  sudo apt-get update
-  sudo apt-get install -y ffmpeg libvulkan1 mesa-vulkan-drivers vulkan-tools \
-    python3-venv unzip curl
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ffmpeg unzip curl python3-venv python3-pip
+  # libvulkan1 + vulkan-tools let the ncnn engines run where the driver
+  # provides a Vulkan ICD; they are optional, so a missing repo entry must
+  # not abort setup on minimal container images.
+  if $HAS_NVIDIA; then
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      libvulkan1 vulkan-tools || true
+  else
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      libvulkan1 mesa-vulkan-drivers vulkan-tools || true
+  fi
 else
-  echo "no pacman/apt found — install ffmpeg, vulkan-tools, unzip, and your GPU's Vulkan driver manually, then re-run this script."
+  echo "no pacman/apt found — install ffmpeg, unzip, curl and your GPU's"
+  echo "runtime/Vulkan driver manually, then re-run this script."
 fi
 
 if $IS_WSL && [[ "$ROOT_DIR" == /mnt/* ]]; then
@@ -41,62 +101,152 @@ echo "== Python venv =="
 # pip via the venv's python.
 if [ ! -x .venv/bin/python ] || [ ! -x .venv/bin/pip ] || ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
   rm -rf .venv
-  python3 -m venv .venv
+  "$PYTHON" -m venv .venv
 fi
 .venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 
-echo "== Real-ESRGAN ncnn-vulkan engine binary =="
-ENGINE_DIR="$ROOT_DIR/engines_bin/realesrgan"
-if [ -x "$ENGINE_DIR/realesrgan-ncnn-vulkan" ]; then
-  echo "already installed at $ENGINE_DIR"
+echo "== ONNX Runtime GPU provider =="
+if $HAS_NVIDIA; then
+  # The ORT wheel has to match the image's CUDA and cuDNN runtime. The
+  # PyTorch image on RunPod exposes both through torch. ORT >= 1.20 needs
+  # CUDA 12 + cuDNN 9; cuDNN 8 images need ORT 1.19 (CUDA 12) or 1.17
+  # (CUDA 11.8). Those older wheels predate numpy 2 support.
+  CUDA_VERSION="$("$PYTHON" -c 'import torch; print(torch.version.cuda or "")' 2>/dev/null || true)"
+  CUDNN_VERSION="$("$PYTHON" -c 'import torch; print(torch.backends.cudnn.version() or "")' 2>/dev/null || true)"
+  ORT_SPEC="onnxruntime-gpu>=1.20,<2"
+  NUMPY_SPEC=""
+  if [[ "$CUDA_VERSION" == 11.* ]]; then
+    ORT_SPEC="onnxruntime-gpu==1.17.3"
+    NUMPY_SPEC="numpy<2"
+  elif [[ "$CUDNN_VERSION" =~ ^[0-9]+$ ]] && [ "$CUDNN_VERSION" -lt 90000 ]; then
+    ORT_SPEC="onnxruntime-gpu==1.19.2"
+    NUMPY_SPEC="numpy<2"
+  fi
+  echo "CUDA ${CUDA_VERSION:-unknown}, cuDNN ${CUDNN_VERSION:-unknown} -> $ORT_SPEC"
+  specs=("$ORT_SPEC")
+  [ -n "$NUMPY_SPEC" ] && specs=("$NUMPY_SPEC" "$ORT_SPEC")
+  .venv/bin/python -m pip install "${specs[@]}"
 else
-  mkdir -p "$ENGINE_DIR"
-  TMP_ZIP="$(mktemp)"
-  curl -sL -o "$TMP_ZIP" \
-    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
-  unzip -o -q "$TMP_ZIP" -d "$ENGINE_DIR"
-  chmod +x "$ENGINE_DIR/realesrgan-ncnn-vulkan"
-  rm -f "$TMP_ZIP"
-  echo "installed to $ENGINE_DIR"
+  echo "no NVIDIA GPU found — the ONNX engine will use the CPU provider"
+  echo "(set UPSCALER_ALLOW_CPU=1 to allow it, useful only for tests)."
 fi
 
-echo "== RIFE ncnn-vulkan frame interpolation binary =="
-RIFE_DIR="$ROOT_DIR/engines_bin/rife"
-if [ -x "$RIFE_DIR/rife-ncnn-vulkan" ] && [ -d "$RIFE_DIR/rife-v4.6" ]; then
-  echo "already installed at $RIFE_DIR"
-else
-  mkdir -p "$RIFE_DIR"
-  TMP_ZIP="$(mktemp)"
-  TMP_DIR="$(mktemp -d)"
-  # ~430 MB: the release bundles every RIFE model; only v4.6 is kept
-  curl -sL -o "$TMP_ZIP" \
-    "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip"
-  unzip -o -q "$TMP_ZIP" -d "$TMP_DIR"
-  cp "$TMP_DIR"/rife-ncnn-vulkan-*/rife-ncnn-vulkan "$RIFE_DIR/"
-  cp -r "$TMP_DIR"/rife-ncnn-vulkan-*/rife-v4.6 "$RIFE_DIR/"
-  cp "$TMP_DIR"/rife-ncnn-vulkan-*/LICENSE "$RIFE_DIR/" 2>/dev/null || true
-  chmod +x "$RIFE_DIR/rife-ncnn-vulkan"
-  rm -rf "$TMP_ZIP" "$TMP_DIR"
-  echo "installed to $RIFE_DIR"
+vulkan_gpu_detected() {
+  command -v vulkaninfo >/dev/null 2>&1 || return 1
+  vulkaninfo --summary 2>/dev/null \
+    | grep -Eq 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_(DISCRETE_GPU|INTEGRATED_GPU)'
+}
+
+WANT_VULKAN=false
+if [ "$WITH_VULKAN" = yes ]; then
+  WANT_VULKAN=true
+elif [ "$WITH_VULKAN" = auto ] && vulkan_gpu_detected; then
+  WANT_VULKAN=true
 fi
 
-echo
-echo "== Checking Vulkan sees a GPU =="
-if command -v vulkaninfo >/dev/null; then
-  vulkaninfo --summary 2>&1 | grep -i "deviceName" || echo "vulkaninfo ran but reported no device — check your Vulkan/Mesa install."
-  if $IS_WSL; then
-    echo "(on WSL the GPU shows up via the Dozen/D3D12 driver, often named"
-    echo " 'Microsoft Direct3D12 (<your GPU>)'; 'llvmpipe' is the CPU fallback —"
-    echo " if you only see llvmpipe, update your Windows GPU driver and run 'wsl --update')"
+if $WANT_VULKAN; then
+  echo "== Real-ESRGAN ncnn-vulkan engine binary =="
+  ENGINE_DIR="$ROOT_DIR/engines_bin/realesrgan"
+  if [ -x "$ENGINE_DIR/realesrgan-ncnn-vulkan" ]; then
+    echo "already installed at $ENGINE_DIR"
+  else
+    mkdir -p "$ENGINE_DIR"
+    TMP_ZIP="$(mktemp)"
+    curl -fsSL --retry 3 -o "$TMP_ZIP" \
+      "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
+    unzip -o -q "$TMP_ZIP" -d "$ENGINE_DIR"
+    chmod +x "$ENGINE_DIR/realesrgan-ncnn-vulkan"
+    rm -f "$TMP_ZIP"
+    echo "installed to $ENGINE_DIR"
+  fi
+
+  echo "== RIFE ncnn-vulkan frame interpolation binary =="
+  RIFE_DIR="$ROOT_DIR/engines_bin/rife"
+  if [ -x "$RIFE_DIR/rife-ncnn-vulkan" ] && [ -d "$RIFE_DIR/rife-v4.6" ]; then
+    echo "already installed at $RIFE_DIR"
+  else
+    mkdir -p "$RIFE_DIR"
+    TMP_ZIP="$(mktemp)"
+    TMP_DIR="$(mktemp -d)"
+    # ~430 MB: the release bundles every RIFE model; only v4.6 is kept
+    curl -fsSL --retry 3 -o "$TMP_ZIP" \
+      "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip"
+    unzip -o -q "$TMP_ZIP" -d "$TMP_DIR"
+    cp "$TMP_DIR"/rife-ncnn-vulkan-*/rife-ncnn-vulkan "$RIFE_DIR/"
+    cp -r "$TMP_DIR"/rife-ncnn-vulkan-*/rife-v4.6 "$RIFE_DIR/"
+    cp "$TMP_DIR"/rife-ncnn-vulkan-*/LICENSE "$RIFE_DIR/" 2>/dev/null || true
+    chmod +x "$RIFE_DIR/rife-ncnn-vulkan"
+    rm -rf "$TMP_ZIP" "$TMP_DIR"
+    echo "installed to $RIFE_DIR"
   fi
 else
-  echo "vulkaninfo not installed (optional) — install the 'vulkan-tools' package to double check GPU detection."
+  echo "== Vulkan engines =="
+  echo "skipping the ncnn Real-ESRGAN/RIFE binaries: no usable Vulkan GPU."
+  echo "(the ONNX engine is the fast path anyway; force with --with-vulkan)"
+fi
+
+echo "== Checking engines =="
+if ! .venv/bin/python - <<'PY'
+import sys
+
+from backend.engines import REGISTRY
+
+available = []
+for engine in REGISTRY.values():
+    reason = engine.unavailable_reason()
+    print(("  OK  " if reason is None else "  --  ") + engine.label +
+          ("" if reason is None else f" ({reason})"))
+    if reason is None:
+        available.append(engine)
+if not available:
+    print("no engine is available", file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  echo "setup finished, but no engine is usable — see the reasons above." >&2
+  exit 1
+fi
+
+if $HAS_NVIDIA; then
+  echo "== CUDA smoke test (x2 model on the GPU) =="
+  if ! .venv/bin/python - <<'PY'
+import numpy as np
+import onnxruntime as ort
+
+from backend.paths import MODELS_DIR
+
+if "CUDAExecutionProvider" not in ort.get_available_providers():
+    raise SystemExit(
+        "onnxruntime is installed but has no CUDAExecutionProvider: "
+        + ", ".join(ort.get_available_providers())
+    )
+session = ort.InferenceSession(
+    str(MODELS_DIR / "realesr-animevideov3-x2.onnx"),
+    providers=[("CUDAExecutionProvider", {"device_id": 0})],
+)
+frame = np.zeros((1, 64, 64, 3), dtype=np.uint8)
+out = session.run(None, {session.get_inputs()[0].name: frame})[0]
+if out.shape != (1, 128, 128, 3):
+    raise SystemExit(f"unexpected output shape {out.shape}")
+print(f"CUDA upscale OK: {frame.shape} -> {out.shape} "
+      f"via {session.get_providers()[0]}")
+PY
+  then
+    echo
+    echo "The CUDA smoke test failed. onnxruntime-gpu must match the image's" >&2
+    echo "CUDA and cuDNN versions; the PyTorch RunPod templates (CUDA 12.x)" >&2
+    echo "work out of the box. Re-run after switching the pod template." >&2
+    exit 1
+  fi
 fi
 
 echo
-echo "Setup done. Start the server with:"
-echo "  source .venv/bin/activate"
-echo "  uvicorn backend.main:app --reload"
-echo "Then open http://127.0.0.1:8000"
+echo "Setup done."
+command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary 2>/dev/null \
+  | grep -i "deviceName" || true
+echo "Start the server with:"
+echo "  ./scripts/run.sh"
+echo "This binds 0.0.0.0:8000 (override with UVICORN_HOST/UVICORN_PORT)."
+echo "On RunPod, expose port 8000 as an HTTP port."
