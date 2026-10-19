@@ -149,6 +149,18 @@ class RealEsrganOnnxEngine(UpscaleEngine):
                 name = self._gpu_provider()
                 device = {} if gpu_id is None or name == "CPUExecutionProvider" else {"device_id": gpu_id}
                 session = ort.InferenceSession(str(self._model_path(scale)), options, providers=[(name, device)])
+                active = session.get_providers()
+                if name != "CPUExecutionProvider" and (not active or active[0] != name):
+                    # ORT logs a warning and silently runs on the CPU when a
+                    # provider library fails to load. A render would then take
+                    # minutes per frame instead of seconds — fail clearly.
+                    raise RuntimeError(
+                        f"{name} failed to load for the x{scale} model; ONNX Runtime "
+                        f"fell back to {active[0] if active else 'no provider'}. "
+                        "Install an onnxruntime-gpu build matching this machine's "
+                        "CUDA/cuDNN (scripts/setup.sh does this), or set "
+                        f"{_ALLOW_CPU_ENV}=1 to run on the CPU."
+                    )
                 self._sessions[key] = session
             return session
 

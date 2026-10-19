@@ -57,11 +57,13 @@ On a RunPod pod using a **PyTorch** template:
 ```
 
 `setup.sh` detects the NVIDIA GPU, installs ffmpeg and the venv, and installs
-`onnxruntime-gpu` matching the image's CUDA version (CUDA 12.x templates work
-without any CUDA/cuDNN setup). It skips the ncnn/Vulkan binaries unless
-Vulkan sees a real GPU, since containers normally have no Vulkan ICD. It ends
-with a real x2 inference on the GPU, so a CUDA/cuDNN mismatch fails at setup
-time instead of in the middle of a render.
+a pinned `onnxruntime-gpu` matching the image's CUDA/cuDNN (CUDA 12.0–12.7,
+12.8+, and 13.x each need a different build; the CUDA 13 default on PyPI does
+not load on CUDA 12 images). It skips the ncnn/Vulkan binaries unless Vulkan
+sees a real GPU, since containers normally have no Vulkan ICD. It ends with a
+real x2 inference that must run on `CUDAExecutionProvider` — a CUDA/cuDNN
+mismatch fails at setup time instead of silently falling back to the CPU, and
+the app itself now refuses to fall back too.
 
 `run.sh` listens on `0.0.0.0:8000` and, when `/workspace` exists, keeps job
 data in `/workspace/upscaler-data` (survives pod restarts). Keep the project

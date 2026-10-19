@@ -109,25 +109,43 @@ fi
 
 echo "== ONNX Runtime GPU provider =="
 if $HAS_NVIDIA; then
-  # The ORT wheel has to match the image's CUDA and cuDNN runtime. The
-  # PyTorch image on RunPod exposes both through torch. ORT >= 1.20 needs
-  # CUDA 12 + cuDNN 9; cuDNN 8 images need ORT 1.19 (CUDA 12) or 1.17
-  # (CUDA 11.8). Those older wheels predate numpy 2 support.
+  # The ORT wheel has to match the image's CUDA and cuDNN runtime. Since
+  # 1.27 the PyPI default is a CUDA 13 build, so blindly installing the
+  # latest breaks every CUDA 12 image (libcublasLt.so.13 not found).
   CUDA_VERSION="$("$PYTHON" -c 'import torch; print(torch.version.cuda or "")' 2>/dev/null || true)"
   CUDNN_VERSION="$("$PYTHON" -c 'import torch; print(torch.backends.cudnn.version() or "")' 2>/dev/null || true)"
-  ORT_SPEC="onnxruntime-gpu>=1.20,<2"
+  CUDA_MAJOR="${CUDA_VERSION%%.*}"
+  CUDA_MINOR="${CUDA_VERSION#*.}"
+  CUDA_MINOR="${CUDA_MINOR%%.*}"
+  CUDNN_MAJOR=9
+  if [[ "$CUDNN_VERSION" =~ ^[0-9]+$ ]]; then
+    CUDNN_MAJOR=$((CUDNN_VERSION / 10000))
+  fi
+
+  ORT_SPEC="onnxruntime-gpu==1.20.2"
   NUMPY_SPEC=""
-  if [[ "$CUDA_VERSION" == 11.* ]]; then
-    ORT_SPEC="onnxruntime-gpu==1.17.3"
+  if [ "$CUDA_MAJOR" = 11 ]; then
+    # CUDA 11.8 is only used by PyTorch <= 2.3 images (Python <= 3.11).
+    ORT_SPEC="onnxruntime-gpu==1.17.1"
     NUMPY_SPEC="numpy<2"
-  elif [[ "$CUDNN_VERSION" =~ ^[0-9]+$ ]] && [ "$CUDNN_VERSION" -lt 90000 ]; then
-    ORT_SPEC="onnxruntime-gpu==1.19.2"
+  elif [ "$CUDNN_MAJOR" -lt 9 ]; then
+    # cuDNN 8 (PyTorch <= 2.3): last cuDNN 8 wheel on PyPI.
+    ORT_SPEC="onnxruntime-gpu==1.18.0"
     NUMPY_SPEC="numpy<2"
+  elif [ "$CUDA_MAJOR" -ge 13 ]; then
+    ORT_SPEC="onnxruntime-gpu>=1.27,<2"
+  elif [ "$CUDA_MAJOR" = 12 ] && [ "${CUDA_MINOR:-0}" -ge 8 ]; then
+    # Built with CUDA 12.8; supports Python 3.10-3.13.
+    ORT_SPEC="onnxruntime-gpu==1.21.1"
   fi
   echo "CUDA ${CUDA_VERSION:-unknown}, cuDNN ${CUDNN_VERSION:-unknown} -> $ORT_SPEC"
   specs=("$ORT_SPEC")
   [ -n "$NUMPY_SPEC" ] && specs=("$NUMPY_SPEC" "$ORT_SPEC")
   .venv/bin/python -m pip install "${specs[@]}"
+  .venv/bin/python - <<'PY'
+import onnxruntime as ort
+print("onnxruntime", ort.__version__)
+PY
 else
   echo "no NVIDIA GPU found — the ONNX engine will use the CPU provider"
   echo "(set UPSCALER_ALLOW_CPU=1 to allow it, useful only for tests)."
@@ -226,18 +244,26 @@ session = ort.InferenceSession(
     str(MODELS_DIR / "realesr-animevideov3-x2.onnx"),
     providers=[("CUDAExecutionProvider", {"device_id": 0})],
 )
+active = session.get_providers()
+if not active or active[0] != "CUDAExecutionProvider":
+    raise SystemExit(
+        f"CUDAExecutionProvider failed to load (onnxruntime {ort.__version__}); "
+        f"session fell back to {active[0] if active else 'no provider'}. "
+        "The installed onnxruntime-gpu does not match this image's CUDA/cuDNN."
+    )
 frame = np.zeros((1, 64, 64, 3), dtype=np.uint8)
 out = session.run(None, {session.get_inputs()[0].name: frame})[0]
 if out.shape != (1, 128, 128, 3):
     raise SystemExit(f"unexpected output shape {out.shape}")
-print(f"CUDA upscale OK: {frame.shape} -> {out.shape} "
-      f"via {session.get_providers()[0]}")
+print(f"CUDA upscale OK: {frame.shape} -> {out.shape} via {active[0]}")
 PY
   then
     echo
-    echo "The CUDA smoke test failed. onnxruntime-gpu must match the image's" >&2
-    echo "CUDA and cuDNN versions; the PyTorch RunPod templates (CUDA 12.x)" >&2
-    echo "work out of the box. Re-run after switching the pod template." >&2
+    echo "The CUDA smoke test failed (CUDA ${CUDA_VERSION:-unknown}," \
+         "cuDNN ${CUDNN_VERSION:-unknown})." >&2
+    echo "onnxruntime-gpu must match the image's CUDA/cuDNN versions." >&2
+    echo "Check that 'python3' is the image's interpreter (the one with torch)," >&2
+    echo "then re-run ./scripts/setup.sh." >&2
     exit 1
   fi
 fi
