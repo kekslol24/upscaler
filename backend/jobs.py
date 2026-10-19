@@ -454,6 +454,7 @@ class JobManager:
         info = pipeline.probe(job.input_path)
         options = job.render_options()
         interp = job.interpolation
+        interpolator = get_interpolator(interp.engine) if interp else None
         engine = None if job.engine == NO_UPSCALE else get_engine(job.engine)
         output_path = job.dir / ("preview.mp4" if options.clip else "output.mp4")
         job.output_path = output_path
@@ -465,6 +466,11 @@ class JobManager:
                 job.input_path, output_path, info, job.scale,
                 lambda d, t: progress(d, "upscaling + encoding"),
                 gpu_id=job.gpu_id, options=options,
+            )
+        elif (interpolator is not None and interpolator.streaming
+              and (engine is None or engine.streaming)):
+            self._run_streaming(
+                job, info, engine, interpolator, interp, options, output_path, progress,
             )
         else:
             self._run_chunked(job, info, engine, interp, options, output_path, progress)
@@ -489,6 +495,70 @@ class JobManager:
         except Exception as exc:  # noqa: BLE001 - the render itself succeeded
             job.message = f"done (no comparison copy: {exc})"
         self._save(job)
+
+    def _run_streaming(
+        self,
+        job: Job,
+        info: pipeline.VideoInfo,
+        engine,
+        interpolator,
+        interp: Interpolation,
+        options: RenderOptions,
+        output_path: Path,
+        progress: _Progress,
+    ) -> None:
+        if engine is None:
+            job.message = "interpolating"
+            interpolator.interpolate_video(
+                job.input_path, output_path, info, interp.factor, interp.mode,
+                lambda d, t: progress(d, "interpolating"),
+                gpu_id=job.gpu_id, options=options,
+            )
+            return
+
+        work = job.dir / "work"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        intermediate = work / "interpolated.mp4"
+        total = max(info.frames_in(options.clip), 1)
+        interp_options = RenderOptions(
+            clip=options.clip,
+            filters=Filters(
+                deinterlace=options.filters.deinterlace,
+                denoise=options.filters.denoise,
+                sharpen=False,
+            ),
+            encode=EncodeSettings(codec="h264", encoder="auto", quality=18, preset="veryfast"),
+        )
+        job.message = "interpolating"
+        interpolator.interpolate_video(
+            job.input_path, intermediate, info, interp.factor, interp.mode,
+            lambda d, t: progress(d * 0.5, "interpolating"),
+            gpu_id=job.gpu_id, options=interp_options,
+        )
+
+        temp_info = pipeline.probe(intermediate)
+        temp_total = max(temp_info.frames_in(None), 1)
+        up_options = RenderOptions(
+            clip=None,
+            filters=Filters(
+                deinterlace=False,
+                denoise=0,
+                sharpen=options.filters.sharpen,
+            ),
+            encode=options.encode,
+        )
+
+        def on_upscale(done: int, _total: int) -> None:
+            fraction = min(done / temp_total, 1.0)
+            progress(total * 0.5 + total * 0.5 * fraction, "upscaling + encoding")
+
+        job.message = "upscaling + encoding"
+        engine.upscale_video(
+            intermediate, output_path, temp_info, job.scale, on_upscale,
+            gpu_id=job.gpu_id, options=up_options,
+        )
+        shutil.rmtree(work, ignore_errors=True)
 
     def _run_chunked(
         self,

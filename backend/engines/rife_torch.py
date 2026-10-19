@@ -1,0 +1,305 @@
+"""RIFE v4.6 frame interpolation through PyTorch on CUDA.
+
+Unlike the ncnn engine this path never writes PNG frames: decoded RGB
+frames go straight into the model and the generated frames go straight
+back into ffmpeg. At 4K that is the difference between disk-bound
+interpolation and running the network at full GPU speed.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .. import pipeline
+from ..paths import MODELS_DIR
+from .base import FrameInterpolator, ProgressCallback
+
+if TYPE_CHECKING:
+    from .rife_torch_model import RifeModel
+
+MODEL_DIR = MODELS_DIR / "rife-v4.6"
+WEIGHTS_PATH = MODEL_DIR / "flownet.pkl"
+
+#: above 1080p-ish, run RIFE's half-resolution flow mode
+_UHD_THRESHOLD = 1920 * 1080 * 1.5
+_MODELS: dict[tuple[str, str], "RifeModel"] = {}
+
+
+class RifeTorchInterpolator(FrameInterpolator):
+    streaming = True
+
+    def __init__(self, name: str, label: str, description: str = "") -> None:
+        self.name = name
+        self.label = label
+        self.description = description
+
+    @property
+    def model_path(self) -> Path:
+        return WEIGHTS_PATH
+
+    def is_available(self) -> bool:
+        if not self.model_path.is_file():
+            return False
+        if importlib.util.find_spec("torch") is None:
+            return False
+        try:
+            import torch
+        except Exception:
+            return False
+        return torch.cuda.is_available()
+
+    def unavailable_reason(self) -> str | None:
+        if not self.model_path.is_file():
+            return f"RIFE PyTorch weights missing: {self.model_path}"
+        if importlib.util.find_spec("torch") is None:
+            return "PyTorch is not installed in this Python environment"
+        try:
+            import torch
+        except Exception as exc:
+            return f"PyTorch failed to import: {exc}"
+        if not torch.cuda.is_available():
+            return "PyTorch CUDA is not available"
+        return None
+
+    def interpolate_video(
+        self,
+        input_path: Path,
+        output_path: Path,
+        info: pipeline.VideoInfo,
+        factor: int,
+        mode: str,
+        on_progress: ProgressCallback,
+        gpu_id: int | None = None,
+        options: pipeline.RenderOptions | None = None,
+    ) -> None:
+        options = options or pipeline.RenderOptions()
+        factor = max(1, int(factor))
+        torch, model = self._load(gpu_id)
+        scale = self._scale(info.width, info.height)
+        if mode == "smooth":
+            out_rate = pipeline.scale_frame_rate(info.frame_rate, factor)
+            audio_source = input_path if info.has_audio else None
+        elif mode == "slowmo":
+            out_rate = info.frame_rate
+            audio_source = None
+        else:
+            raise ValueError(f"unknown interpolation mode: {mode!r}")
+
+        frame_bytes = info.width * info.height * 3
+        total = max(info.frames_in(options.clip), 1)
+        reader = pipeline.open_frame_reader(input_path, options)
+        writer = None
+        done = 0
+        try:
+            first = _read_exact(reader.stdout, frame_bytes)
+            if first is None:
+                raise RuntimeError("no frames decoded from the source")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = pipeline.open_frame_writer(
+                output_path, info.width, info.height, out_rate, audio_source, options,
+            )
+            writer.stdin.write(first)
+            prev = self._to_tensor(torch, first, info.width, info.height, model.device)
+            done = 1
+            on_progress(done, total)
+
+            while True:
+                buf = _read_exact(reader.stdout, frame_bytes)
+                if buf is None:
+                    break
+                cur = self._to_tensor(torch, buf, info.width, info.height, model.device)
+                for step in range(1, factor):
+                    out = self._infer(model, prev, cur, step / factor, scale)
+                    writer.stdin.write(self._to_bytes(torch, out))
+                writer.stdin.write(buf)
+                prev = cur
+                done += 1
+                on_progress(done, total)
+            self._finish_writer(writer)
+            writer = None
+            _check_reader(reader)
+            reader = None
+            on_progress(done, total)
+        finally:
+            if writer is not None:
+                _terminate(writer)
+            if reader is not None:
+                _terminate(reader)
+
+    def interpolate_frames(
+        self,
+        in_dir: Path,
+        out_dir: Path,
+        target_count: int,
+        on_progress: ProgressCallback,
+        gpu_id: int | None = None,
+    ) -> None:
+        torch, model = self._load(gpu_id)
+        files = sorted(p for p in in_dir.iterdir() if p.suffix == ".png")
+        if not files:
+            raise RuntimeError(f"no PNG frames in {in_dir}")
+        if target_count <= 0:
+            return
+        width, height = _png_size(files[0])
+        if not width or not height:
+            raise RuntimeError(f"cannot read PNG dimensions: {files[0]}")
+        scale = self._scale(width, height)
+        frame_bytes = width * height * 3
+        out_dir.mkdir(parents=True, exist_ok=True)
+        reader = pipeline.open_frame_reader(in_dir / "%08d.png")
+        writer = pipeline.open_frame_writer(out_dir / "%08d.png", width, height, "1")
+        try:
+            first = _read_exact(reader.stdout, frame_bytes)
+            if first is None:
+                raise RuntimeError(f"no frames decoded from {in_dir}")
+            cur_bytes = first
+            cur = self._to_tensor(torch, first, width, height, model.device)
+            cur_idx = 0
+            nxt_bytes = None
+            nxt = None
+            span = len(files) - 1
+            for out_idx in range(target_count):
+                pos = out_idx * span / max(target_count - 1, 1)
+                src_idx = min(span, int(pos))
+                frac = pos - src_idx
+                while cur_idx < src_idx:
+                    if nxt_bytes is None:
+                        nxt_bytes = _read_exact(reader.stdout, frame_bytes)
+                        if nxt_bytes is None:
+                            raise RuntimeError(f"frame stream ended early in {in_dir}")
+                        nxt = self._to_tensor(torch, nxt_bytes, width, height, model.device)
+                    cur_bytes, cur = nxt_bytes, nxt
+                    nxt_bytes, nxt = None, None
+                    cur_idx += 1
+                if frac <= 1e-6 or src_idx >= span:
+                    writer.stdin.write(cur_bytes)
+                else:
+                    if nxt_bytes is None:
+                        nxt_bytes = _read_exact(reader.stdout, frame_bytes)
+                        if nxt_bytes is None:
+                            raise RuntimeError(f"frame stream ended early in {in_dir}")
+                        nxt = self._to_tensor(torch, nxt_bytes, width, height, model.device)
+                    out = self._infer(model, cur, nxt, frac, scale)
+                    writer.stdin.write(self._to_bytes(torch, out))
+                on_progress(out_idx + 1, target_count)
+            self._finish_writer(writer)
+            writer = None
+            on_progress(target_count, target_count)
+        finally:
+            if writer is not None:
+                _terminate(writer)
+            _terminate(reader)
+
+    def _load(self, gpu_id: int | None):
+        import torch
+        from .rife_torch_model import RifeModel
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("PyTorch CUDA is not available")
+        count = torch.cuda.device_count()
+        index = gpu_id if gpu_id is not None and 0 <= gpu_id < count else 0
+        device = torch.device(f"cuda:{index}")
+        key = (str(device), str(self.model_path))
+        model = _MODELS.get(key)
+        if model is None:
+            torch.cuda.set_device(device)
+            torch.backends.cudnn.benchmark = True
+            model = RifeModel(self.model_path, device)
+            _MODELS[key] = model
+        return torch, model
+
+    @staticmethod
+    def _scale(width: int, height: int) -> float:
+        return 0.5 if width * height > _UHD_THRESHOLD else 1.0
+
+    @staticmethod
+    def _infer(model: "RifeModel", prev, cur, timestep: float,
+               scale: float):
+        import torch.nn.functional as F
+
+        height, width = prev.shape[-2:]
+        block = max(128, int(128 / scale))
+        pad_h = (block - height % block) % block
+        pad_w = (block - width % block) % block
+        if pad_h or pad_w:
+            prev = F.pad(prev, (0, pad_w, 0, pad_h))
+            cur = F.pad(cur, (0, pad_w, 0, pad_h))
+        out = model.infer(prev, cur, timestep, scale)
+        return out[..., :height, :width]
+
+    @staticmethod
+    def _to_tensor(torch, buf: bytes, width: int, height: int, device):
+        frame = torch.frombuffer(bytearray(buf), dtype=torch.uint8)
+        frame = frame.view(height, width, 3).permute(2, 0, 1).unsqueeze(0)
+        return frame.to(device=device, non_blocking=True).float().div_(255.0)
+
+    @staticmethod
+    def _to_bytes(torch, frame) -> bytes:
+        frame = frame[0].clamp(0.0, 1.0).mul(255.0).add(0.5)
+        frame = frame.clamp(0.0, 255.0).to(torch.uint8)
+        return frame.permute(1, 2, 0).contiguous().cpu().numpy().tobytes()
+
+    @staticmethod
+    def _finish_writer(writer) -> None:
+        try:
+            writer.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        err = writer.stderr.read().decode(errors="replace").strip()
+        code = writer.wait()
+        if code != 0:
+            raise RuntimeError(f"ffmpeg encode failed ({code}): {err}")
+
+
+def _read_exact(stream, size: int) -> bytes | None:
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            if remaining == size:
+                return None
+            raise RuntimeError("unexpected end of decoded frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _check_reader(reader) -> None:
+    try:
+        reader.stdout.close()
+    except OSError:
+        pass
+    err = reader.stderr.read().decode(errors="replace").strip()
+    code = reader.wait()
+    if code != 0:
+        raise RuntimeError(f"ffmpeg decode failed ({code}): {err}")
+
+
+def _terminate(proc) -> None:
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except OSError:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    try:
+        with open(path, "rb") as f:
+            header = f.read(24)
+    except OSError:
+        return 0, 0
+    if header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return 0, 0
+    return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")

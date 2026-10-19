@@ -22,4 +22,12 @@ PORT="${UVICORN_PORT:-${PORT:-8000}}"
 
 echo "Upscaler listening on http://${HOST}:${PORT}"
 [ -n "${UPSCALER_DATA_DIR:-}" ] && echo "Job data: ${UPSCALER_DATA_DIR}"
+
+# The NVIDIA Vulkan ICD can fail with vkCreateInstance -9 when no X display
+# exists, even though the container is headless. RIFE (and the Vulkan
+# upscalers) need a working Vulkan device, so give them a virtual one.
+if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null 2>&1; then
+  echo "Starting a virtual X display for headless Vulkan"
+  exec xvfb-run -a .venv/bin/python -m uvicorn backend.main:app --host "$HOST" --port "$PORT"
+fi
 exec .venv/bin/python -m uvicorn backend.main:app --host "$HOST" --port "$PORT"

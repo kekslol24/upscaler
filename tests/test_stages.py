@@ -1,7 +1,7 @@
-"""The chunked stage pipeline: chunk overlap, interpolation frame counts,
-smooth vs slow-motion output, and interpolate-only renders — driven by a
-fake interpolator so it runs without the RIFE binary. The real RIFE
-engine gets a test that runs only where the binary is installed."""
+"""The stage pipeline: chunk overlap, interpolation frame counts, smooth vs
+slow-motion output, and interpolate-only renders — driven by a fake
+interpolator so it runs without RIFE. The real CUDA and Vulkan RIFE engines
+get tests that run only where their dependencies are installed."""
 
 import shutil
 import subprocess
@@ -184,7 +184,40 @@ def test_cancel_during_chunked_render(manager, tiny_video, fake_interpolator, mo
     assert not (job.dir / "work").exists() and not (job.dir / "output.mp4").exists()
 
 
-@pytest.mark.skipif(not INTERPOLATORS["rife-v4.6"].is_available(), reason="rife-ncnn-vulkan not installed")
+@pytest.mark.skipif(not INTERPOLATORS["rife-v4.6"].is_available(), reason="RIFE PyTorch CUDA not available")
+def test_real_rife_torch_streaming_contract(tmp_path, tiny_video):
+    info = pipeline.probe(tiny_video)
+    out = tmp_path / "out.mp4"
+    progress = []
+    INTERPOLATORS["rife-v4.6"].interpolate_video(
+        tiny_video, out, info, 2, "smooth",
+        lambda d, t: progress.append((d, t)),
+        options=pipeline.RenderOptions(encode=pipeline.EncodeSettings(encoder="libx264")),
+    )
+    assert progress[-1] == (info.estimated_frames, info.estimated_frames)
+    out_info = pipeline.probe(out)
+    assert out_info.frame_rate == "24/1"
+    assert out_info.has_audio
+    assert _video_packets(out) == (info.estimated_frames - 1) * 2 + 1
+
+
+@pytest.mark.skipif(not INTERPOLATORS["rife-v4.6"].is_available(), reason="RIFE PyTorch CUDA not available")
+def test_streaming_interpolation_then_streaming_upscale(manager, tiny_video, cpu_engine):
+    job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
+    manager.start(job.id, ENGINE, 2, options={
+        "interpolate": {"engine": "rife-v4.6", "factor": 2, "mode": "smooth"},
+        "encode": {"encoder": "libx264"},
+    })
+    job = _wait(manager, job.id)
+    assert job.status == "done", job.message
+    info = pipeline.probe(job.output_path)
+    assert info.frame_rate == "24/1" and info.has_audio
+    assert (info.width, info.height) == (128, 96)
+    assert _video_packets(job.output_path) == (12 - 1) * 2 + 1
+    assert not (job.dir / "work").exists()
+
+
+@pytest.mark.skipif(not INTERPOLATORS["rife-v4.6-vulkan"].is_available(), reason="rife-ncnn-vulkan not installed")
 def test_real_rife_directory_mode_contract(tmp_path, tiny_video):
     """Documents the assumption the chunk pipeline makes about the binary:
     `-n` frames come out, sorted names are playback order."""

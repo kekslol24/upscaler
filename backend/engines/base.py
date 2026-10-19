@@ -33,6 +33,9 @@ class FrameInterpolator(ABC):
     name: str
     label: str
     description: str = ""
+    #: True if the interpolator implements interpolate_video() (frames
+    #: streamed through pipes, no intermediate PNGs); the harness prefers it.
+    streaming: bool = False
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -54,6 +57,22 @@ class FrameInterpolator(ABC):
         sorted listing is playback order. Must call on_progress with
         (frames_done, target_count) and let JobCancelled propagate after
         stopping any child process."""
+
+    def interpolate_video(
+        self,
+        input_path: Path,
+        output_path: Path,
+        info: "VideoInfo",
+        factor: int,
+        mode: str,
+        on_progress: ProgressCallback,
+        gpu_id: int | None = None,
+        options: "RenderOptions | None" = None,
+    ) -> None:
+        """Streaming alternative to interpolate_frames(): decode input_path,
+        interpolate, and encode straight to output_path without writing
+        intermediate frames. Only called when `streaming` is True."""
+        raise NotImplementedError
 
 
 class UpscaleEngine(ABC):

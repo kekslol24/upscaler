@@ -11,6 +11,7 @@ from .base import FrameInterpolator, UpscaleEngine
 from .realesrgan_ncnn import RealEsrganNcnnEngine
 from .realesrgan_onnx import RealEsrganOnnxEngine
 from .rife_ncnn import RifeNcnnInterpolator
+from .rife_torch import RifeTorchInterpolator
 
 #: pseudo-engine name for "interpolate only, don't upscale"
 NO_UPSCALE = "none"
@@ -53,11 +54,16 @@ REGISTRY: dict[str, UpscaleEngine] = {
 INTERPOLATORS: dict[str, FrameInterpolator] = {
     interp.name: interp
     for interp in [
-        RifeNcnnInterpolator(
+        RifeTorchInterpolator(
             name="rife-v4.6",
+            label="RIFE v4.6 (CUDA)",
+            description="Optical-flow frame interpolation on the GPU, streamed between decoder and encoder. Much faster than the Vulkan build at 4K.",
+        ),
+        RifeNcnnInterpolator(
+            name="rife-v4.6-vulkan",
             label="RIFE v4.6 (Vulkan)",
             model_name="rife-v4.6",
-            description="Optical-flow frame interpolation; any multiplier. Run after upscaling for smoother motion or slow motion.",
+            description="Portable Vulkan build of RIFE v4.6. Falls back to directory-mode PNG processing.",
         ),
     ]
 }

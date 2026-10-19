@@ -174,8 +174,11 @@ def _list_nvidia_gpus() -> list[GpuInfo]:
 
 def list_gpus() -> list[GpuInfo]:
     vulkan = _list_vulkan_gpus()
-    if any(g.device_type in ("DISCRETE_GPU", "INTEGRATED_GPU") for g in vulkan):
-        return vulkan
+    hardware = [g for g in vulkan if g.device_type in ("DISCRETE_GPU", "INTEGRATED_GPU")]
+    if hardware:
+        # A headless Xvfb setup also makes Mesa's llvmpipe visible; it is a
+        # CPU device, not something the GPU picker should offer.
+        return hardware
 
     nvidia = _list_nvidia_gpus()
     if nvidia:

@@ -60,7 +60,7 @@ fi
 
 echo "== System packages (ffmpeg + unzip + Vulkan loader/tools) =="
 if command -v pacman >/dev/null 2>&1; then
-  $SUDO pacman -S --needed --noconfirm ffmpeg unzip curl python python-pip vulkan-icd-loader vulkan-tools
+  $SUDO pacman -S --needed --noconfirm ffmpeg unzip curl python python-pip vulkan-icd-loader vulkan-tools xorg-server-xvfb xorg-xauth
   if ! $HAS_NVIDIA; then
     $SUDO pacman -S --needed --noconfirm vulkan-radeon || true
   fi
@@ -71,7 +71,7 @@ elif command -v apt-get >/dev/null 2>&1; then
   # with scripts/setup.ps1 instead.
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ffmpeg unzip curl python3-venv python3-pip
+    ffmpeg unzip curl python3-venv python3-pip xvfb xauth
   # libvulkan1 + vulkan-tools let the ncnn engines run where the driver
   # provides a Vulkan ICD; they are optional, so a missing repo entry must
   # not abort setup on minimal container images.
@@ -106,6 +106,34 @@ fi
 .venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
+
+# CUDA images (RunPod etc.) ship PyTorch in the system interpreter. Let the
+# venv see it instead of downloading a second multi-GB torch wheel.
+if "$PYTHON" -c 'import torch' >/dev/null 2>&1 && ! .venv/bin/python -c 'import torch' >/dev/null 2>&1; then
+  echo "== Using the image's PyTorch (system site packages) =="
+  sed -i 's/^include-system-site-packages = false/include-system-site-packages = true/' .venv/pyvenv.cfg
+  if ! .venv/bin/python -c 'import torch' >/dev/null 2>&1; then
+    echo "warning: system PyTorch is still not importable from .venv" >&2
+  fi
+fi
+
+echo "== RIFE PyTorch weights =="
+RIFE_MODEL_DIR="$ROOT_DIR/models/rife-v4.6"
+if [ -f "$RIFE_MODEL_DIR/flownet.pkl" ]; then
+  echo "already installed at $RIFE_MODEL_DIR"
+else
+  mkdir -p "$RIFE_MODEL_DIR"
+  TMP_ZIP="$(mktemp)"
+  if curl -fsSL --retry 3 -o "$TMP_ZIP" \
+    "https://huggingface.co/Bash2X/RIFE-Models/resolve/main/RIFE_v4.6.zip" \
+    && unzip -o -q "$TMP_ZIP" flownet.pkl -d "$RIFE_MODEL_DIR"; then
+    echo "installed to $RIFE_MODEL_DIR"
+  else
+    echo "warning: could not install RIFE v4.6 weights; the CUDA interpolator" >&2
+    echo "will be unavailable until $RIFE_MODEL_DIR/flownet.pkl exists." >&2
+  fi
+  rm -f "$TMP_ZIP"
+fi
 
 echo "== ONNX Runtime GPU provider =="
 if $HAS_NVIDIA; then
@@ -151,9 +179,19 @@ else
   echo "(set UPSCALER_ALLOW_CPU=1 to allow it, useful only for tests)."
 fi
 
+vulkan_summary() {
+  if [ -n "${DISPLAY:-}" ] || ! command -v xvfb-run >/dev/null 2>&1; then
+    vulkaninfo --summary 2>/dev/null || true
+  else
+    # NVIDIA's Vulkan ICD can refuse to initialize without an X display,
+    # even on a headless host. A virtual display is enough to enumerate it.
+    xvfb-run -a vulkaninfo --summary 2>/dev/null || true
+  fi
+}
+
 vulkan_gpu_detected() {
   command -v vulkaninfo >/dev/null 2>&1 || return 1
-  vulkaninfo --summary 2>/dev/null \
+  vulkan_summary \
     | grep -Eq 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_(DISCRETE_GPU|INTEGRATED_GPU)'
 }
 
@@ -209,17 +247,17 @@ echo "== Checking engines =="
 if ! .venv/bin/python - <<'PY'
 import sys
 
-from backend.engines import REGISTRY
+from backend.engines import INTERPOLATORS, REGISTRY
 
 available = []
-for engine in REGISTRY.values():
-    reason = engine.unavailable_reason()
-    print(("  OK  " if reason is None else "  --  ") + engine.label +
+for item in [*REGISTRY.values(), *INTERPOLATORS.values()]:
+    reason = item.unavailable_reason()
+    print(("  OK  " if reason is None else "  --  ") + item.label +
           ("" if reason is None else f" ({reason})"))
     if reason is None:
-        available.append(engine)
+        available.append(item)
 if not available:
-    print("no engine is available", file=sys.stderr)
+    print("no engine or interpolator is available", file=sys.stderr)
     sys.exit(1)
 PY
 then
@@ -270,7 +308,7 @@ fi
 
 echo
 echo "Setup done."
-command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary 2>/dev/null \
+command -v vulkaninfo >/dev/null 2>&1 && vulkan_summary \
   | grep -i "deviceName" || true
 echo "Start the server with:"
 echo "  ./scripts/run.sh"

@@ -230,8 +230,10 @@ function applyPreset(preset) {
   const interp = preset.interpolate || {};
   interpFactorSelect.value = String(interp.factor || 0);
   if (interp.mode) interpModeSelect.value = interp.mode;
-  if (interp.engine && interpolators.some((i) => i.name === interp.engine)) {
-    interpEngineSelect.value = interp.engine;
+  if (interp.engine) {
+    const preferred = interpolators.find((i) => i.name === interp.engine && i.available);
+    const fallback = interpolators.find((i) => i.available);
+    if (preferred || fallback) interpEngineSelect.value = (preferred || fallback).name;
   }
   updateInterpHint();
   const enc = preset.encode || {};

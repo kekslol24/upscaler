@@ -5,11 +5,15 @@ pick an engine, get a before/after slider.
 
 Two engines run the same Real-ESRGAN anime-video model:
 
-- **DirectML (default on Windows)**: ONNX Runtime, whole-frame inference,
+- **DirectML/CUDA (default)**: ONNX Runtime, whole-frame inference,
   frames streamed straight between ffmpeg decoder and encoder. Several
   times faster than the Vulkan build and needs no scratch disk space.
   Output is identical to within one 8-bit level.
 - **Vulkan (ncnn)**: the portable prebuilt binary; works on Linux too.
+
+Frame interpolation has the same choice: the CUDA RIFE engine streams
+frames through PyTorch with no PNG scratch files, while the Vulkan build
+remains available as a portable fallback.
 
 ## Setup
 
@@ -41,11 +45,14 @@ before starting the server so it is on PATH.
 ```
 
 This installs `ffmpeg`/Vulkan via pacman or apt, creates a Python venv,
-installs Python deps, and downloads the Real-ESRGAN ncnn-vulkan engine binary
-(runs on Intel/AMD/NVIDIA GPUs via Vulkan — no CUDA needed). When an NVIDIA
-GPU is present it also installs `onnxruntime-gpu`, so the fast ONNX engine
-runs on CUDA and a GPU smoke test is performed. Pass `--with-vulkan` or
-`--skip-vulkan` to override the automatic Vulkan download decision.
+installs Python deps, downloads the RIFE v4.6 PyTorch weights, and downloads
+the Real-ESRGAN ncnn-vulkan engine binary (runs on Intel/AMD/NVIDIA GPUs via
+Vulkan — no CUDA needed). When an NVIDIA GPU is present it also installs
+`onnxruntime-gpu`, so the fast ONNX engine runs on CUDA and a GPU smoke test
+is performed. If the image already ships PyTorch in its system interpreter,
+setup enables system site packages in `.venv` instead of downloading a second
+torch wheel. Pass `--with-vulkan` or `--skip-vulkan` to override the automatic
+Vulkan download decision.
 
 ### RunPod / headless GPU containers
 
@@ -59,13 +66,42 @@ On a RunPod pod using a **PyTorch** template:
 `setup.sh` detects the NVIDIA GPU, installs ffmpeg and the venv, and installs
 a pinned `onnxruntime-gpu` matching the image's CUDA/cuDNN (CUDA 12.0–12.7,
 12.8+, and 13.x each need a different build; the CUDA 13 default on PyPI does
-not load on CUDA 12 images). It skips the ncnn/Vulkan binaries unless Vulkan
-sees a real GPU, since containers normally have no Vulkan ICD. It ends with a
-real x2 inference that must run on `CUDAExecutionProvider` — a CUDA/cuDNN
-mismatch fails at setup time instead of silently falling back to the CPU, and
-the app itself now refuses to fall back too.
+not load on CUDA 12 images). It reuses the image's PyTorch installation for the
+CUDA RIFE engine and downloads the RIFE v4.6 weights. It also downloads the
+ncnn/Vulkan binaries when Vulkan sees a real GPU; on headless hosts it probes
+through a temporary virtual X display, because NVIDIA's Vulkan ICD can refuse
+to initialize without one. It ends with a real x2 inference that must run on
+`CUDAExecutionProvider` — a CUDA/cuDNN mismatch fails at setup time instead of
+silently falling back to the CPU, and the app itself now refuses to fall back
+too.
 
-`run.sh` listens on `0.0.0.0:8000` and, when `/workspace` exists, keeps job
+On a 4K source, prefer **No upscaling** when you only need interpolation:
+upscaling 4K to 8K is much more expensive than generating the extra frames.
+If ffmpeg falls back to `libx264` (no NVENC), encoding is the remaining
+bottleneck; NVENC needs the container's `video` driver capability (RunPod
+templates sometimes expose only `compute,utility`).
+
+#### Reading the interpolate FPS
+
+The progress line for interpolation counts **source** frames. A 2x render
+therefore produces about twice the displayed fps (e.g. `7.5 fps` in the UI
+means ~15 output fps). On the RTX 4090 the RIFE forward pass alone runs at
+roughly 20 fps at 4K full-resolution flow and 45 fps in UHD half-resolution
+mode, but that is not the end-to-end rate: decoding 4K and encoding 4K60
+H.264 also compete for CPU. During the first 4K test, `ffmpeg`/libx264 used
+~870% CPU while the GPU stayed near 1% utilization. That container reported
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility`, so NVENC was unavailable.
+Restart the pod with `NVIDIA_DRIVER_CAPABILITIES=all` (or
+`compute,utility,video`); the encoder cache key includes the capability value,
+so a restart automatically re-probes and picks up `h264_nvenc`/`hevc_nvenc`.
+When NVENC is unavailable, libx264 now defaults to `veryfast` at the requested
+CRF, which is about 1.5x faster than `medium` at 4K60 with little visible
+difference at CRF 18. The first 36s 4K 30→60 fps interpolation-only render
+finished in about 2.5 minutes at that ~7.5 source / ~15 output fps.
+
+`run.sh` listens on `0.0.0.0:8000` and starts a virtual X display automatically
+when `DISPLAY` is unset, so the Vulkan engines and RIFE work in the headless
+container. When `/workspace` exists, it keeps job
 data in `/workspace/upscaler-data` (survives pod restarts). Keep the project
 itself on `/workspace` too, so the venv and downloaded engines persist. Expose
 **8000** as an HTTP port in the pod settings, then open the pod's proxy URL.
@@ -124,8 +160,7 @@ values with an engine preference list, so adding one is a few lines.
 
 ### Frame interpolation (RIFE)
 
-`rife-ncnn-vulkan` (downloaded by the setup scripts into `engines_bin/rife/`)
-adds a frame-rate stage after upscaling:
+RIFE v4.6 adds a frame-rate stage:
 
 - **Smooth motion**: 2x/3x/4x the frame rate (24 → 48/72/96 fps), same
   duration, audio kept.
@@ -133,13 +168,20 @@ adds a frame-rate stage after upscaling:
   clip runs 2–4x slower; audio is dropped.
 - Pick **No upscaling** as the engine to interpolate only.
 
-Any render that uses a directory-mode stage (interpolation, or the Vulkan
-engines) runs through the **chunked pipeline**: the source is decoded once
-and cut into 5-second chunks of PNG frames, each chunk is upscaled →
-interpolated → encoded to a segment and its frames deleted, and the segments
-are concatenated losslessly at the end. Disk use stays at a few GB no matter
-how long the source is. Chunks overlap by one frame so the interpolator sees
-every frame pair.
+The default **RIFE v4.6 (CUDA)** engine runs the network through PyTorch and
+streams decoded RGB frames directly into ffmpeg. On an RTX 4090 a 4K pair takes
+roughly 22–48 ms depending on the UHD half-resolution mode, instead of the
+0.3–0.5 fps the PNG-directory ncnn path managed. Interpolation-only renders
+bypass the chunked pipeline completely.
+
+The Vulkan fallback (`rife-ncnn-vulkan`, downloaded into `engines_bin/rife/`)
+still exists for machines without PyTorch/CUDA. Renders that use a
+directory-mode stage (the Vulkan interpolator or an ncnn upscaler) go through
+the **chunked pipeline**: the source is decoded once and cut into 5-second
+chunks of PNG frames, each chunk is upscaled → interpolated → encoded to a
+segment and its frames deleted, and the segments are concatenated losslessly
+at the end. Disk use stays bounded, and chunks overlap by one frame so the
+interpolator sees every frame pair.
 
 ### Engines
 
@@ -149,7 +191,8 @@ every frame pair.
 | Real-ESRGAN anime video (Vulkan) | ncnn binary | anime, any GPU/OS |
 | Real-ESRGAN anime, max detail | ncnn binary | anime stills model, crispest lines |
 | Real-ESRGAN live action / general | ncnn binary | real footage, 4x only, slow |
-| RIFE v4.6 | ncnn binary | frame interpolation |
+| RIFE v4.6 (CUDA) | PyTorch + CUDA, streaming | frame interpolation, fastest |
+| RIFE v4.6 (Vulkan) | ncnn binary | frame interpolation, portable fallback |
 
 ## Desktop build (Windows .exe / installer)
 

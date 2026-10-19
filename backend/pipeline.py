@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -84,6 +85,9 @@ class EncodeSettings:
     encoder: str = "auto"        # "auto" or an ffmpeg encoder name
     #: CRF / CQ style quality, lower is better; 18 is visually lossless-ish
     quality: int = 18
+    #: optional x264/x265 speed preset override (e.g. "veryfast" for
+    #: intermediate files that are re-encoded anyway)
+    preset: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,7 +161,8 @@ def available_encoders() -> list[str]:
     """
     if not ffmpeg_available():
         return []
-    version = f"{_ffmpeg_version()} / probe {_ENCODER_PROBE_VERSION}"
+    caps = os.environ.get("NVIDIA_DRIVER_CAPABILITIES", "")
+    version = f"{_ffmpeg_version()} / probe {_ENCODER_PROBE_VERSION} / caps {caps}"
     cache_path = DATA_DIR / "encoders.json"
     try:
         cached = json.loads(cache_path.read_text())
@@ -203,7 +208,10 @@ def encode_args(settings: EncodeSettings, container: str = "mp4") -> list[str]:
     q = str(max(0, min(51, settings.quality)))
     args = ["-c:v", enc, "-pix_fmt", "yuv420p"]
     if enc in ("libx264", "libx265"):
-        args += ["-preset", "medium", "-crf", q]
+        # 4K60 H.264 on the CPU is the pipeline bottleneck when NVENC is
+        # unavailable; veryfast is visually close at CRF 18 and ~1.5x faster.
+        preset = settings.preset or ("veryfast" if enc == "libx264" else "medium")
+        args += ["-preset", preset, "-crf", q]
     elif enc.endswith("_nvenc"):
         args += ["-preset", "p5", "-rc", "vbr", "-cq", q, "-b:v", "0"]
     elif enc.endswith("_amf"):
