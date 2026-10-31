@@ -9,6 +9,7 @@ interpolation and running the network at full GPU speed.
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,36 @@ _UHD_THRESHOLD = 1920 * 1080 * 1.5
 _MODELS: dict[tuple[str, str], "RifeModel"] = {}
 
 
+def _cuda_visible_devices() -> str | None:
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None:
+        return None
+    return raw or "(empty)"
+
+
+def _cuda_state() -> dict:
+    """Inspect the CUDA situation without raising.
+
+    Returns one of:
+      {"ok": bool, "error": str|None, "device_count": int|None,
+       "visible": str|None, "available": bool}
+    `available=False` means torch is importable but CUDA is not usable
+    (the whole reason this stack falls back to Vulkan/CPU engines).
+    """
+    if importlib.util.find_spec("torch") is None:
+        return {"ok": False, "error": "PyTorch is not installed", "available": False, "device_count": None, "visible": _cuda_visible_devices()}
+    try:
+        import torch
+    except Exception as exc:
+        return {"ok": False, "error": f"PyTorch failed to import: {exc}", "available": False, "device_count": None, "visible": _cuda_visible_devices()}
+    if not torch.cuda.is_available():
+        return {"ok": False, "error": None, "available": False, "device_count": 0, "visible": _cuda_visible_devices()}
+    count = torch.cuda.device_count()
+    if count == 0:
+        return {"ok": False, "error": "PyTorch reports zero CUDA devices despite CUDA being available", "available": True, "device_count": 0, "visible": _cuda_visible_devices()}
+    return {"ok": True, "error": None, "available": True, "device_count": count, "visible": _cuda_visible_devices()}
+
+
 class RifeTorchInterpolator(FrameInterpolator):
     streaming = True
 
@@ -42,25 +73,28 @@ class RifeTorchInterpolator(FrameInterpolator):
     def is_available(self) -> bool:
         if not self.model_path.is_file():
             return False
-        if importlib.util.find_spec("torch") is None:
-            return False
-        try:
-            import torch
-        except Exception:
-            return False
-        return torch.cuda.is_available()
+        return _cuda_state()["ok"]
 
     def unavailable_reason(self) -> str | None:
         if not self.model_path.is_file():
             return f"RIFE PyTorch weights missing: {self.model_path}"
-        if importlib.util.find_spec("torch") is None:
-            return "PyTorch is not installed in this Python environment"
-        try:
-            import torch
-        except Exception as exc:
-            return f"PyTorch failed to import: {exc}"
-        if not torch.cuda.is_available():
-            return "PyTorch CUDA is not available"
+        state = _cuda_state()
+        # A specific reason (not installed / import failed / zero devices)
+        # wins over the generic "CUDA not available" hint.
+        if state["error"]:
+            return state["error"]
+        if not state["available"]:
+            raw = state["visible"]
+            hint = (
+                f" (CUDA_VISIBLE_DEVICES={raw!r})"
+                if raw not in (None, "", "-1")
+                else ""
+            )
+            return (
+                "PyTorch CUDA is not available"
+                f"{hint}; nvidia-smi may show GPUs that torch cannot see — "
+                "check CUDA_VISIBLE_DEVICES / the container driver permissions"
+            )
         return None
 
     def interpolate_video(
@@ -197,9 +231,17 @@ class RifeTorchInterpolator(FrameInterpolator):
         from .rife_torch_model import RifeModel
 
         if not torch.cuda.is_available():
-            raise RuntimeError("PyTorch CUDA is not available")
+            raise RuntimeError(
+                "PyTorch CUDA is not available"
+            )
         count = torch.cuda.device_count()
-        index = gpu_id if gpu_id is not None and 0 <= gpu_id < count else 0
+        if gpu_id is not None and not (0 <= gpu_id < count):
+            raise RuntimeError(
+                f"no usable CUDA device with index {gpu_id}: "
+                f"torch sees {count} CUDA device(s) "
+                f"(CUDA_VISIBLE_DEVICES={_cuda_visible_devices()!r})"
+            )
+        index = gpu_id if gpu_id is not None else 0
         device = torch.device(f"cuda:{index}")
         key = (str(device), str(self.model_path))
         model = _MODELS.get(key)

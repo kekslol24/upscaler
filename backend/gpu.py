@@ -73,6 +73,15 @@ def detection_available() -> bool:
     return vulkaninfo_available() or _nvidia_smi_binary() is not None
 
 
+def cuda_visible_devices() -> str | None:
+    """Raw value of CUDA_VISIBLE_DEVICES, the env var that decides which
+    physical GPUs PyTorch/ONNX see as `cuda:0..N`. `None` means unset."""
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None:
+        return None
+    return raw or "(empty)"
+
+
 def _list_vulkan_gpus() -> list[GpuInfo]:
     binary = _vulkaninfo_binary()
     out = ""

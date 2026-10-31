@@ -26,11 +26,20 @@ class StartJobRequest(BaseModel):
 
 @app.get("/api/gpus")
 def list_gpus():
+    known = gpu.list_gpus()
+    cuda_n = None
+    try:
+        import torch
+        cuda_n = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    except Exception:
+        cuda_n = None
     return {
         "detectable": gpu.detection_available(),
+        "cuda_visible_devices": gpu.cuda_visible_devices(),
+        "torch_cuda_device_count": cuda_n,
         "gpus": [
             {"index": g.index, "name": g.name, "vendor": g.vendor, "type": g.device_type}
-            for g in gpu.list_gpus()
+            for g in known
         ],
     }
 

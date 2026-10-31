@@ -1,4 +1,5 @@
 .venv/
+.acl-recovery/         # Windows sandbox ACL diagnostic/rollback backups
 __pycache__/
 *.pyc
 build/
