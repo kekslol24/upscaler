@@ -52,6 +52,9 @@ further gain for this path.
   locked; SQLite uses WAL/busy_timeout for concurrent progress writes.
 - The jobs table shows each job's GPU, refreshes every 5 s, and can watch any
   running job.
+- The file picker accepts multiple files; "Render all uploaded" batch-starts
+  every uploaded source with the current settings, and GPU Auto distributes
+  them across the worker pool.
 - Only tested on this 1-GPU pod (scheduler unit test covers least-loaded
   selection); CPU encode/disk are shared, so real multi-GPU scaling still
   needs a multi-GPU pod.

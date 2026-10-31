@@ -142,6 +142,9 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
 - Parallel renders are one worker per GPU (`UPSCALER_WORKERS` caps it); "Auto"
   assigns the least-loaded GPU. CPU encode and disk are shared: one 4K
   libx264 job uses ~4–5 cores, so N concurrent 4K jobs need roughly N× that.
+  The UI accepts multiple files and "Render all uploaded" batch-starts them
+  with the current settings; GPU Auto distributes across GPUs and queues the
+  rest.
 - Encoder detection test-encodes each encoder once and caches it at
   `<data dir>/encoders.json`; delete that file to force a re-probe.
 - Job data defaults to `./data` in a checkout (`UPSCALER_DATA_DIR` overrides);

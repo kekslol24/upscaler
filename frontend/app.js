@@ -24,6 +24,7 @@ const previewStartInput = $("previewStartInput");
 const previewLengthInput = $("previewLengthInput");
 const previewBtn = $("previewBtn");
 const renderBtn = $("renderBtn");
+const renderAllBtn = $("renderAllBtn");
 
 const progressSection = $("progressSection");
 const progressMessage = $("progressMessage");
@@ -55,6 +56,7 @@ let encoders = [];
 let interpolators = [];
 const NO_UPSCALE = "none";
 let currentJob = null;   // the uploaded source we render from
+let uploading = false;   // a multi-file upload is in progress
 let activeJobId = null;  // the job currently being polled
 let pollTimer = null;
 
@@ -311,9 +313,10 @@ function newUploadId() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function uploadSource(file) {
+async function uploadSource(file, label = "") {
   const uploadId = newUploadId();
   const total = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK));
+  const prefix = label ? `${label}: ` : "";
   for (let i = 0; i < total; i++) {
     const chunk = file.slice(i * UPLOAD_CHUNK, (i + 1) * UPLOAD_CHUNK);
     const res = await fetch(
@@ -322,7 +325,7 @@ async function uploadSource(file) {
     );
     if (!res.ok) throw new Error((await res.text()) || `upload chunk ${i} failed`);
     const pct = Math.round(((i + 1) / total) * 100);
-    sourceInfo.textContent = `uploading ${file.name}… ${pct}%`;
+    sourceInfo.textContent = `uploading ${prefix}${file.name}… ${pct}%`;
   }
   return fetchJson(
     `/api/upload/complete?upload_id=${uploadId}&filename=${encodeURIComponent(file.name)}`,
@@ -331,20 +334,36 @@ async function uploadSource(file) {
 }
 
 fileInput.addEventListener("change", async () => {
-  const file = fileInput.files[0];
-  if (!file) return;
+  const files = Array.from(fileInput.files);
+  if (!files.length) return;
   resetSections();
   previewBtn.disabled = true;
   renderBtn.disabled = true;
-  sourceInfo.textContent = `uploading ${file.name}…`;
+  renderAllBtn.disabled = true;
+  let last = null;
+  const errors = [];
+  uploading = true;
   try {
-    const job = await uploadSource(file);
-    setSource(job);
-    loadJobs();
-  } catch (err) {
-    sourceInfo.textContent = "";
-    showError(err.message || String(err));
+    for (let i = 0; i < files.length; i++) {
+      const label = `${i + 1}/${files.length}`;
+      sourceInfo.textContent = `uploading ${label}: ${files[i].name}…`;
+      try {
+        last = await uploadSource(files[i], label);
+      } catch (err) {
+        errors.push(`${files[i].name}: ${err.message || err}`);
+      }
+    }
+  } finally {
+    uploading = false;
   }
+  fileInput.value = "";  // allow selecting the same files again
+  if (last) setSource(last);
+  loadJobs();
+  if (files.length > 1 && !errors.length) {
+    sourceInfo.textContent =
+      `${files.length} sources uploaded — choose settings, then “Render all uploaded”.`;
+  }
+  if (errors.length) showError(errors.join("\n"));
 });
 
 // -- rendering -----------------------------------------------------------
@@ -404,6 +423,42 @@ async function startRender(preview) {
   }
 }
 
+async function renderAllUploaded() {
+  const body = {
+    engine: engineSelect.value,
+    scale: Number(scaleSelect.value),
+    gpu_id: gpuSelect.value === "" ? null : Number(gpuSelect.value),
+    options: collectOptions(false),
+  };
+  let jobs;
+  try {
+    jobs = await fetchJson("/api/jobs");
+  } catch (err) {
+    showError(err.message || String(err));
+    return;
+  }
+  const pending = jobs.filter((job) => job.status === "uploaded");
+  if (!pending.length) {
+    showError("No uploaded sources to render.");
+    return;
+  }
+  const errors = [];
+  for (const job of pending) {
+    try {
+      await fetchJson(`/api/jobs/${job.id}/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      errors.push(`${job.filename}: ${err.message || err}`);
+    }
+  }
+  loadJobs();
+  if (errors.length) showError(errors.join("\n"));
+}
+
+renderAllBtn.addEventListener("click", renderAllUploaded);
 previewBtn.addEventListener("click", () => startRender(true));
 renderBtn.addEventListener("click", () => startRender(false));
 
@@ -574,6 +629,7 @@ async function loadJobs() {
   }
   jobsBody.innerHTML = "";
   jobsSection.hidden = jobs.length === 0;
+  renderAllBtn.disabled = uploading || !jobs.some((job) => job.status === "uploaded");
   for (const job of jobs) {
     const tr = document.createElement("tr");
     const render = job.scale ? describeRender(job) : "not rendered";

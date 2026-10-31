@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>4K Upscaler</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
   <main>
@@ -13,9 +13,9 @@
       <h2>Source</h2>
       <label class="field">
         <span>Video file</span>
-        <input type="file" id="fileInput" accept="video/*,.mkv">
+        <input type="file" id="fileInput" accept="video/*,.mkv" multiple>
       </label>
-      <p id="sourceInfo" class="hint">Pick a file — it is uploaded straight away so you can preview settings before committing to a full render.</p>
+      <p id="sourceInfo" class="hint">Pick one or more files — they upload straight away so you can preview settings before committing.</p>
     </section>
 
     <section id="settingsSection">
@@ -129,8 +129,9 @@
       <div class="actions">
         <button type="button" id="previewBtn" disabled>Preview clip</button>
         <button type="button" id="renderBtn" disabled class="secondary">Render full video</button>
+        <button type="button" id="renderAllBtn" disabled class="secondary">Render all uploaded</button>
       </div>
-      <p class="hint">A preview renders only the chosen window so you can compare settings in seconds; the full render processes the whole file.</p>
+      <p class="hint">A preview renders only the chosen window so you can compare settings in seconds; the full render processes the whole file. “Render all uploaded” applies the current settings to every uploaded source; with GPU Auto, the backend spreads them across the GPUs.</p>
     </section>
 
     <section id="progressSection" hidden>
@@ -176,6 +177,6 @@
     </section>
   </main>
 
-  <script src="/app.js"></script>
+  <script src="/app.js?v=2"></script>
 </body>
 </html>

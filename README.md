@@ -230,6 +230,10 @@ to pin an episode. You can upload and start the next episode while another is
 rendering — **Recent jobs** refreshes every few seconds and **Watch** switches
 the progress view to any running job.
 
+The file picker accepts multiple files. Upload a batch, set the options once,
+then **Render all uploaded**; with **GPU: Auto** the backend spreads them
+across the GPUs and queues extra episodes as GPUs free up.
+
 `UPSCALER_WORKERS=N` caps the number of concurrent GPU workers (default:
 every detected GPU). CPU encoding and disk are shared: one 4K H.264 encode
 uses roughly 4–5 cores, so N concurrent 4K renders need about N× the CPU and
