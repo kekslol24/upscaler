@@ -28,17 +28,20 @@ WEIGHTS_PATH = MODEL_DIR / "flownet.pkl"
 #: above 1080p-ish, run RIFE's half-resolution flow mode
 _UHD_THRESHOLD = 1920 * 1080 * 1.5
 _MODELS: dict[tuple[str, str], "RifeModel"] = {}
+_MODELS_LOCK = threading.Lock()
 
-#: Reusable pinned host buffers for the GPU->CPU frame download.
-#: A blocking `.cpu()` of one 4K RGB frame measured ~1.5 GB/s (15-40 ms) on
-#: the RunPod 4090, while a pinned copy runs at ~20 GB/s (~1-2 ms), and the
-#: download was the dominant per-frame cost. Reuse one buffer per frame
-#: shape instead of allocating (and page-faulting) a fresh pageable one.
-_PINNED_HOST: dict[tuple[int, ...], "torch.Tensor"] = {}
+#: Per-worker pinned host buffers for the GPU->CPU frame download. Each
+#: worker thread can own one per frame shape, so concurrent jobs on
+#: different GPUs never overwrite each other's frames.
+_PINNED = threading.local()
 
 
 def _pinned_host(torch, shape: tuple[int, ...]):
-    buf = _PINNED_HOST.get(shape)
+    cache = getattr(_PINNED, "buffers", None)
+    if cache is None:
+        cache = {}
+        _PINNED.buffers = cache
+    buf = cache.get(shape)
     if buf is None:
         try:
             buf = torch.empty(shape, dtype=torch.uint8, pin_memory=True)
@@ -46,7 +49,7 @@ def _pinned_host(torch, shape: tuple[int, ...]):
             # Some ROCm/Windows builds cannot allocate pinned memory; the
             # copy still works, it just becomes synchronous.
             buf = torch.empty(shape, dtype=torch.uint8)
-        _PINNED_HOST[shape] = buf
+        cache[shape] = buf
     return buf
 
 
@@ -343,12 +346,13 @@ class RifeTorchInterpolator(FrameInterpolator):
         index = gpu_id if gpu_id is not None else 0
         device = torch.device(f"cuda:{index}")
         key = (str(device), str(self.model_path))
-        model = _MODELS.get(key)
-        if model is None:
-            torch.cuda.set_device(device)
-            torch.backends.cudnn.benchmark = True
-            model = RifeModel(self.model_path, device)
-            _MODELS[key] = model
+        with _MODELS_LOCK:
+            model = _MODELS.get(key)
+            if model is None:
+                torch.cuda.set_device(device)
+                torch.backends.cudnn.benchmark = True
+                model = RifeModel(self.model_path, device)
+                _MODELS[key] = model
         return torch, model
 
     @staticmethod

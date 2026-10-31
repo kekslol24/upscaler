@@ -424,6 +424,11 @@ function setBusy(busy) {
 }
 
 function resetSections() {
+  clearInterval(pollTimer);
+  clearInterval(beforeTimer);
+  activeJobId = null;
+  setBusy(false);
+  cancelBtn.disabled = true;
   progressSection.hidden = true;
   errorSection.hidden = true;
   compareSection.hidden = true;
@@ -573,7 +578,8 @@ async function loadJobs() {
     const tr = document.createElement("tr");
     const render = job.scale ? describeRender(job) : "not rendered";
     const status = job.status === "running" ? `${job.status} ${job.progress}%` : job.status;
-    tr.innerHTML = `<td title="${job.filename}">${job.filename}</td><td>${render}</td><td>${status}</td><td class="job-actions"></td>`;
+    const gpu = job.gpu_id === null || job.gpu_id === undefined ? "—" : job.gpu_id;
+    tr.innerHTML = `<td title="${job.filename}">${job.filename}</td><td>${render}</td><td>${gpu}</td><td>${status}</td><td class="job-actions"></td>`;
     const actions = tr.querySelector(".job-actions");
 
     const useBtn = document.createElement("button");
@@ -621,4 +627,7 @@ async function loadJobs() {
   await Promise.all([loadEngines(), loadGpus(), loadEncoders(), loadInterpolators()]);
   await loadPresets();
   loadJobs();
+  // background episodes keep running while the form moves on; keep the list
+  // fresh so they can be watched or downloaded without a page reload
+  setInterval(loadJobs, 5000);
 })();

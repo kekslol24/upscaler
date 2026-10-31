@@ -19,8 +19,9 @@ and only need the container-specific steps.
 
 ## 1. Create the pod
 
-- **GPU count: 1** (the app renders one job at a time; you don't need 8).
-  Use a 1-GPU pod unless you specifically want parallel jobs later.
+- **GPU count:** 1 is enough for serial renders; the app now runs one render
+  per GPU, so add GPUs only if you want parallel episodes. CPU encode and disk
+  are shared across them.
 - **Template/container:** an NVIDIA CUDA image with PyTorch, e.g.
   `runpod/pytorch` or the RunPod "PyTorch" template matching your CUDA
   version. The setup script reuses the image's system PyTorch via the venv's
@@ -120,7 +121,8 @@ API); this runbook's NVIDIA-specific bits are the NVENC caps and CUDA wheels.
 
 ## Notes
 
-- Multi-GPU: to run N jobs in parallel, launch one app instance per GPU by
-  setting `CUDA_VISIBLE_DEVICES` to a single id per instance, and expose each
-  on its own port. The current app architecture is **single-render-per-worker**,
-  so parallel means multiple instances, not 8 GPUs in one app.
+- Multi-GPU: the app starts one worker per GPU automatically. "Auto" assigns
+  the least-loaded GPU; pin an episode by choosing a GPU in the form.
+  `UPSCALER_WORKERS=N` caps concurrency (default: every detected GPU). One
+  4K H.264 encode uses ~4–5 CPU cores, so size the pod's CPU and disk for the
+  number of concurrent episodes. A 1-GPU pod still works as before.

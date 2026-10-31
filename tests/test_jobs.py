@@ -46,6 +46,18 @@ def test_upload_probes_and_rejects_garbage(manager, tiny_video):
         manager.create_job("nope.mp4", b"not a video")
 
 
+def test_pick_gpu_prefers_idle_worker(monkeypatch, tmp_path):
+    import backend.jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_worker_gpu_ids", lambda: [0, 1])
+    manager = jobs_mod.JobManager(data_dir=tmp_path / "jobs")
+    assert manager._pick_gpu() == 0
+    manager._running[0] = 1
+    assert manager._pick_gpu() == 1
+    manager._running[1] = 1
+    assert manager._pick_gpu() in (0, 1)
+
+
 def test_chunked_upload_assembles_chunks(manager, tiny_video):
     data = tiny_video.read_bytes()
     upload_id = "a" * 32

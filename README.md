@@ -222,6 +222,19 @@ running render can be cancelled. Finished jobs stay listed in **Recent
 jobs** across server restarts (job state lives in `data/jobs/jobs.sqlite3`)
 and can be re-used as a source or viewed again.
 
+### Parallel renders (one episode per GPU)
+
+`backend/jobs.py` starts one worker per detected GPU. A new job with
+**GPU: Auto** goes to the least-loaded GPU; pick a specific GPU in the form
+to pin an episode. You can upload and start the next episode while another is
+rendering — **Recent jobs** refreshes every few seconds and **Watch** switches
+the progress view to any running job.
+
+`UPSCALER_WORKERS=N` caps the number of concurrent GPU workers (default:
+every detected GPU). CPU encoding and disk are shared: one 4K H.264 encode
+uses roughly 4–5 cores, so N concurrent 4K renders need about N× the CPU and
+N× the disk. A 1-GPU machine behaves exactly as before.
+
 ### Filters and output
 
 - **Deinterlace** (`bwdif`) and **denoise** (`hqdn3d`, three strengths) run

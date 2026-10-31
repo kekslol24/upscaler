@@ -1,9 +1,12 @@
-"""Job store + single background worker thread.
+"""Job store + one background worker per GPU.
 
-One job runs at a time by design — this targets a single slow laptop
-GPU, not throughput. Jobs are persisted as JSON rows in a SQLite file
-next to the artifacts, so finished outputs are still listed after a
-server restart (a job that was mid-render is marked as interrupted).
+Each GPU has its own worker thread and queue, so a multi-GPU machine can
+render one episode on each GPU concurrently. Jobs started with "Auto" go
+to the least-loaded GPU; an explicit gpu_id pins one. A machine with no
+usable GPU gets a single worker, preserving the old serial behaviour.
+Jobs are persisted as JSON rows in a SQLite file next to the artifacts,
+so finished outputs are still listed after a server restart (a job that
+was mid-render is marked as interrupted).
 
 A job is one uploaded source; it can be rendered more than once — a
 few preview clips to compare settings, then the full render.
@@ -25,6 +28,7 @@ Two execution paths:
 from __future__ import annotations
 
 import json
+import os
 import queue
 import shutil
 import sqlite3
@@ -292,6 +296,34 @@ class _Progress:
             self.save(job)
 
 
+def _worker_gpu_ids() -> list[int | None]:
+    """GPU indices to run one worker each; [None] means a single worker
+    with no GPU pin (tests, CPU-only machines)."""
+    ids: list[int | None] = []
+    try:
+        import torch
+        if torch.cuda.is_available():
+            ids = list(range(torch.cuda.device_count()))
+    except Exception:  # noqa: BLE001 - torch is optional
+        ids = []
+    if not ids:
+        try:
+            ids = [g.index for g in gpu.list_gpus()]
+        except Exception:  # noqa: BLE001 - detection is best-effort
+            ids = []
+    if not ids:
+        ids = [None]
+    cap = os.environ.get("UPSCALER_WORKERS", "").strip()
+    if cap:
+        try:
+            limit = int(cap)
+        except ValueError:
+            limit = 0
+        if limit > 0:
+            ids = ids[:limit]
+    return ids
+
+
 class JobManager:
     def __init__(self, data_dir: Path = DATA_DIR) -> None:
         self.data_dir = data_dir
@@ -299,17 +331,34 @@ class JobManager:
         self._db_path = self.data_dir / "jobs.sqlite3"
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
-        self._queue: "queue.Queue[str]" = queue.Queue()
+        self._gpu_ids = _worker_gpu_ids()
+        self._queues: dict[int | None, "queue.Queue[str]"] = {
+            gpu_id: queue.Queue() for gpu_id in self._gpu_ids
+        }
+        self._running: dict[int | None, int] = {
+            gpu_id: 0 for gpu_id in self._gpu_ids
+        }
         self._init_db()
         self._load()
         self._cleanup_uploads()
-        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
-        self._worker.start()
+        self._workers = [
+            threading.Thread(
+                target=self._worker_loop,
+                args=(gpu_id, self._queues[gpu_id]),
+                daemon=True,
+            )
+            for gpu_id in self._gpu_ids
+        ]
+        for worker in self._workers:
+            worker.start()
 
     # -- persistence ----------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path, timeout=10)
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -423,6 +472,13 @@ class JobManager:
             jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
 
+    def _pick_gpu(self) -> int | None:
+        """Least busy worker: queued plus currently running jobs."""
+        return min(
+            self._queues,
+            key=lambda g: self._queues[g].qsize() + self._running[g],
+        )
+
     def start(
         self,
         job_id: str,
@@ -461,10 +517,16 @@ class JobManager:
             options["interpolate"] = {"engine": interpolator.name, "factor": factor, "mode": mode}
         if job.status not in RESTARTABLE:
             raise RuntimeError(f"job {job_id} is {job.status}")
-        if gpu_id is not None:
-            known_gpus = gpu.list_gpus()
-            if known_gpus and gpu_id not in {g.index for g in known_gpus}:
+        if gpu_id is None:
+            gpu_id = self._pick_gpu()
+        elif gpu_id not in self._queues:
+            known_gpus = {g.index for g in gpu.list_gpus()}
+            if known_gpus and gpu_id not in known_gpus:
                 raise ValueError(f"no GPU with index {gpu_id}")
+            raise ValueError(
+                f"GPU {gpu_id} is not served by this process "
+                f"(workers: {list(self._queues)})"
+            )
 
         clip = options.get("clip")
         if clip:
@@ -498,7 +560,7 @@ class JobManager:
             job.before_path = None
         job.cancel_requested.clear()
         self._save(job)
-        self._queue.put(job_id)
+        self._queues[gpu_id].put(job_id)
         return job
 
     def cancel(self, job_id: str) -> Job:
@@ -523,12 +585,14 @@ class JobManager:
             job.progress = 0
         self._save(job)
 
-    def _worker_loop(self) -> None:
+    def _worker_loop(self, gpu_id: int | None, work: "queue.Queue[str]") -> None:
         while True:
-            job_id = self._queue.get()
+            job_id = work.get()
             job = self.get(job_id)
             if job is None or job.status != "queued":
                 continue
+            with self._lock:
+                self._running[gpu_id] += 1
             try:
                 self._process(job)
             except JobCancelled:
@@ -537,6 +601,9 @@ class JobManager:
             except Exception as exc:  # noqa: BLE001 - report any failure on the job
                 self._discard_partial(job)
                 self._finish(job, "error", str(exc))
+            finally:
+                with self._lock:
+                    self._running[gpu_id] -= 1
 
     def _discard_partial(self, job: Job) -> None:
         if job.output_path is not None:

@@ -43,6 +43,19 @@ further gain for this path.
 - Large uploads use 8 MB chunks (`/api/upload/chunk`) so RunPod's HTTP proxy
   no longer returns 413 for big MP4/MKV files; chunks are assembled on disk.
 
+## Parallel renders (2026-10-31)
+
+- `JobManager` starts one worker thread per detected GPU; jobs with
+  `gpu_id=None` go to the least-loaded GPU, an explicit `gpu_id` pins one.
+  `UPSCALER_WORKERS=N` caps the worker count (default: all GPUs).
+- RIFE's pinned frame buffers are now thread-local and the model cache is
+  locked; SQLite uses WAL/busy_timeout for concurrent progress writes.
+- The jobs table shows each job's GPU, refreshes every 5 s, and can watch any
+  running job.
+- Only tested on this 1-GPU pod (scheduler unit test covers least-loaded
+  selection); CPU encode/disk are shared, so real multi-GPU scaling still
+  needs a multi-GPU pod.
+
 ## AMD / ROCm (checked 2026-10-31)
 
 - The PyTorch RIFE path is not CUDA-specific: ROCm PyTorch implements the

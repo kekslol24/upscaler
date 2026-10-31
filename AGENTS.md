@@ -60,8 +60,9 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
 
 - `backend/main.py` is the HTTP API; it mounts `frontend/` at `/` as a catch-all
   StaticFiles route, so new API routes must be declared before that mount.
-- `backend/jobs.py` owns a single background worker (one render at a time by
-  design) and persists jobs in SQLite. `manager` is created at import time.
+- `backend/jobs.py` runs one worker thread per detected GPU (one render per
+  GPU at a time; `UPSCALER_WORKERS=N` caps the count) and persists jobs in
+  SQLite. `manager` is created at import time.
 - `backend/pipeline.py` builds all ffmpeg/ffprobe commands and render options.
   Keep frame rates as exact rational strings (e.g. `24000/1001`) and use
   `scale_frame_rate()` when interpolating.
@@ -138,6 +139,9 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   candidate list (libx264); Windows AMD can use AMF (`h264_amf`/`hevc_amf`).
 - RunPod's HTTP proxy returns **413** for large single uploads; the UI uses
   8 MB chunked uploads (`/api/upload/chunk`). Keep any new upload path chunked.
+- Parallel renders are one worker per GPU (`UPSCALER_WORKERS` caps it); "Auto"
+  assigns the least-loaded GPU. CPU encode and disk are shared: one 4K
+  libx264 job uses ~4–5 cores, so N concurrent 4K jobs need roughly N× that.
 - Encoder detection test-encodes each encoder once and caches it at
   `<data dir>/encoders.json`; delete that file to force a re-probe.
 - Job data defaults to `./data` in a checkout (`UPSCALER_DATA_DIR` overrides);
