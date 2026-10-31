@@ -4,5 +4,8 @@ python-multipart>=0.0.9
 numpy>=1.26
 # GPU inference for the ONNX engine (Windows: any DX12 GPU via DirectML).
 # On Linux, scripts/setup.sh installs onnxruntime-gpu automatically when
-# an NVIDIA GPU is present; for AMD/ROCm install a matching build yourself.
+# an NVIDIA GPU is present. AMD Linux: ORT >= 1.23 removed
+# ROCMExecutionProvider; AMD ships the MIGraphX plugin
+# (onnxruntime-ep-migraphx) instead, which the app does not register yet —
+# use the Vulkan upscaler there.
 onnxruntime-directml>=1.20; sys_platform == "win32"

@@ -441,15 +441,20 @@ def open_frame_writer(
     frame_rate: str,
     audio_source: Path | None = None,
     options: RenderOptions | None = None,
+    pix_fmt: str = "rgb24",
 ) -> subprocess.Popen:
     """Start ffmpeg reading raw RGB24 frames of width x height on its
     stdin and encoding them to `target` (a video with options.encode, or
-    PNGs if target is an image-sequence pattern)."""
+    PNGs if target is an image-sequence pattern).
+
+    `pix_fmt` is the raw input format. The CUDA RIFE path converts to
+    yuv420p on the GPU: ffmpeg's own rgb24->yuv420p conversion costs
+    ~30 ms per 4K frame and was the streaming bottleneck."""
     _require_ffmpeg()
     options = options or RenderOptions()
     cmd = [
         "ffmpeg", "-y", "-v", "error",
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-f", "rawvideo", "-pix_fmt", pix_fmt,
         "-s", f"{width}x{height}", "-framerate", frame_rate,
         "-i", "-",
     ]

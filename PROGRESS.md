@@ -1,5 +1,60 @@
 # RIFE CUDA progress — 2026-10-19
 
+## 2026-10-31 performance pass (CUDA streaming)
+
+The CUDA RIFE path was encoder/host-bound at ~5.4 source fps on a 10 s 4K30 →
+60 fps render. Three fixes, all in `backend/engines/rife_torch.py` plus a
+`pix_fmt` argument on `pipeline.open_frame_writer`:
+
+1. **Pinned frame download.** A blocking pageable `.cpu()` of one 4K frame ran
+   at ~1.5 GB/s (15–42 ms); a reusable pinned buffer + `non_blocking` copy runs
+   at ~20 GB/s (~1–3 ms).
+2. **GPU RGB→YUV420p.** ffmpeg's own rgb24→yuv420p conversion costs ~30 ms per
+   4K frame and capped the stream at ~20 output fps. The engine now emits
+   BT.601 limited-range yuv420p (matching ffmpeg's output within <1 level) and
+   the writer takes `pix_fmt="yuv420p"`.
+3. **Overlapped encode.** `_AsyncFrameWriter` feeds ffmpeg's stdin from a
+   background thread so encoding runs while the next RIFE pass runs.
+
+Measured on the same 10 s 4K30→60 clip (libx264 veryfast, CRF 20):
+
+| stage | source fps | output fps | wall |
+|---|---|---|---|
+| baseline | 5.41 | 10.8 | 55.4 s |
+| + pinned D2H | 6.05 | 12.1 | 49.6 s |
+| + GPU YUV | 10.19 | 20.4 | 29.4 s |
+| + overlap thread | 11.02 (12.3 steady) | 22.0 (24.6 steady) | 27.2 s |
+
+PSNR vs the pre-change render: 44 dB. The remaining bottleneck is the producer:
+RIFE forward ~30 ms, 4K decode/read ~19 ms, H2D ~10 ms per source frame. The
+encoder now overlaps and is no longer the limit, so NVENC would give little
+further gain for this path.
+
+## AMD / ROCm (checked 2026-10-31)
+
+- The PyTorch RIFE path is not CUDA-specific: ROCm PyTorch implements the
+  `torch.cuda` API, so `rife_torch.py` runs unchanged. `pin_memory`,
+  `non_blocking` copies, `torch.cuda.synchronize`, `grid_sample` and
+  `torch.backends.cudnn.benchmark` (MIOpen autotuning on current ROCm) are all
+  supported.
+- RX 9060 XT (gfx1200, RDNA 4) is officially supported by ROCm 10.1 on Linux
+  and Windows 11. Linux:
+  `pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-gfx1200]==2.14.0+rocm10.1.0" ...`
+  Windows: install the gfx1200 wheel from
+  `https://rocm.nightlies.amd.com/whl-multi-arch/` (newer/less mature stack).
+- Vulkan ncnn engines work out of the box on AMD (Mesa RADV on Linux, the
+  vendor driver on Windows).
+- ONNX upscaler on Linux AMD is the gap: ORT >= 1.23 removed
+  `ROCMExecutionProvider`; AMD now ships the MIGraphX plugin
+  (`onnxruntime-ep-migraphx`), which `_GPU_PROVIDERS` does not register. Use
+  the Vulkan upscaler or add MIGraphX support. On Windows, DirectML covers it.
+- Performance is not measured here (no AMD hardware): the 9060 XT has roughly
+  1/8 the FP32 compute and 1/3 the bandwidth of a 4090, so 4K RIFE is likely
+  below real-time; 1080p should be comfortable. Benchmark on the card.
+- Older ROCm builds reported only 8 GB of the 16 GB VRAM on this card (ROCm
+  issue #6295); use a current build.
+
+
 ## Current state
 
 - Server is **stopped**. The last `./scripts/run.sh` process exited; an orphan

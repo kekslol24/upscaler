@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import queue
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +28,26 @@ WEIGHTS_PATH = MODEL_DIR / "flownet.pkl"
 #: above 1080p-ish, run RIFE's half-resolution flow mode
 _UHD_THRESHOLD = 1920 * 1080 * 1.5
 _MODELS: dict[tuple[str, str], "RifeModel"] = {}
+
+#: Reusable pinned host buffers for the GPU->CPU frame download.
+#: A blocking `.cpu()` of one 4K RGB frame measured ~1.5 GB/s (15-40 ms) on
+#: the RunPod 4090, while a pinned copy runs at ~20 GB/s (~1-2 ms), and the
+#: download was the dominant per-frame cost. Reuse one buffer per frame
+#: shape instead of allocating (and page-faulting) a fresh pageable one.
+_PINNED_HOST: dict[tuple[int, ...], "torch.Tensor"] = {}
+
+
+def _pinned_host(torch, shape: tuple[int, ...]):
+    buf = _PINNED_HOST.get(shape)
+    if buf is None:
+        try:
+            buf = torch.empty(shape, dtype=torch.uint8, pin_memory=True)
+        except Exception:
+            # Some ROCm/Windows builds cannot allocate pinned memory; the
+            # copy still works, it just becomes synchronous.
+            buf = torch.empty(shape, dtype=torch.uint8)
+        _PINNED_HOST[shape] = buf
+    return buf
 
 
 def _cuda_visible_devices() -> str | None:
@@ -56,6 +78,71 @@ def _cuda_state() -> dict:
     if count == 0:
         return {"ok": False, "error": "PyTorch reports zero CUDA devices despite CUDA being available", "available": True, "device_count": 0, "visible": _cuda_visible_devices()}
     return {"ok": True, "error": None, "available": True, "device_count": count, "visible": _cuda_visible_devices()}
+
+
+class _AsyncFrameWriter:
+    """Feed ffmpeg's stdin from a background thread.
+
+    The encoder runs on the CPU while the next RIFE forward pass runs on
+    the GPU, instead of the two alternating. Frames are copied to `bytes`
+    before queueing because the producer reuses one pinned host buffer.
+    """
+
+    def __init__(self, writer, depth: int = 4) -> None:
+        self._writer = writer
+        self._queue: queue.Queue = queue.Queue(maxsize=depth)
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            while True:
+                data = self._queue.get()
+                if data is None:
+                    return
+                self._writer.stdin.write(data)
+        except BaseException as exc:  # broken pipe if ffmpeg dies
+            self._error = exc
+
+    def write(self, data) -> None:
+        if self._error is not None:
+            raise self._error
+        payload = bytes(data)
+        while True:
+            try:
+                self._queue.put(payload, timeout=0.5)
+                return
+            except queue.Full:
+                # Never block forever if the encoder thread has died.
+                if self._error is not None:
+                    raise self._error
+
+    def close(self) -> None:
+        # Deliver the sentinel only while the consumer is alive: if ffmpeg
+        # died the queue may be full and an unconditional put() would hang.
+        while self._thread.is_alive():
+            try:
+                self._queue.put(None, timeout=0.5)
+                break
+            except queue.Full:
+                if self._error is not None:
+                    break
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+
+    def abort(self) -> None:
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        self._thread.join(timeout=5)
 
 
 class RifeTorchInterpolator(FrameInterpolator):
@@ -123,8 +210,14 @@ class RifeTorchInterpolator(FrameInterpolator):
 
         frame_bytes = info.width * info.height * 3
         total = max(info.frames_in(options.clip), 1)
+        # yuv420p needs even dimensions. Converting RGB->YUV in ffmpeg costs
+        # ~30 ms per 4K frame and caps the stream at ~20 fps, so do it on the
+        # GPU and hand ffmpeg YUV directly (half the pipe payload too).
+        use_yuv = info.width % 2 == 0 and info.height % 2 == 0
+        to_bytes = self._to_yuv_bytes if use_yuv else self._to_bytes
         reader = pipeline.open_frame_reader(input_path, options)
         writer = None
+        sink = None
         done = 0
         try:
             first = _read_exact(reader.stdout, frame_bytes)
@@ -133,9 +226,11 @@ class RifeTorchInterpolator(FrameInterpolator):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             writer = pipeline.open_frame_writer(
                 output_path, info.width, info.height, out_rate, audio_source, options,
+                pix_fmt="yuv420p" if use_yuv else "rgb24",
             )
-            writer.stdin.write(first)
+            sink = _AsyncFrameWriter(writer)
             prev = self._to_tensor(torch, first, info.width, info.height, model.device)
+            sink.write(to_bytes(torch, prev))
             done = 1
             on_progress(done, total)
 
@@ -146,17 +241,21 @@ class RifeTorchInterpolator(FrameInterpolator):
                 cur = self._to_tensor(torch, buf, info.width, info.height, model.device)
                 for step in range(1, factor):
                     out = self._infer(model, prev, cur, step / factor, scale)
-                    writer.stdin.write(self._to_bytes(torch, out))
-                writer.stdin.write(buf)
+                    sink.write(to_bytes(torch, out))
+                sink.write(to_bytes(torch, cur))
                 prev = cur
                 done += 1
                 on_progress(done, total)
+            sink.close()
+            sink = None
             self._finish_writer(writer)
             writer = None
             _check_reader(reader)
             reader = None
             on_progress(done, total)
         finally:
+            if sink is not None:
+                sink.abort()
             if writer is not None:
                 _terminate(writer)
             if reader is not None:
@@ -278,10 +377,42 @@ class RifeTorchInterpolator(FrameInterpolator):
         return frame.to(device=device, non_blocking=True).float().div_(255.0)
 
     @staticmethod
-    def _to_bytes(torch, frame) -> bytes:
+    def _to_bytes(torch, frame) -> "memoryview | bytes":
         frame = frame[0].clamp(0.0, 1.0).mul(255.0).add(0.5)
         frame = frame.clamp(0.0, 255.0).to(torch.uint8)
-        return frame.permute(1, 2, 0).contiguous().cpu().numpy().tobytes()
+        frame = frame.permute(1, 2, 0).contiguous()
+        if frame.device.type != "cuda":
+            return frame.cpu().numpy().tobytes()
+        # Copy into a pinned buffer asynchronously; the caller writes it to
+        # ffmpeg's stdin before the next frame overwrites the buffer.
+        host = _pinned_host(torch, tuple(frame.shape))
+        host.copy_(frame, non_blocking=True)
+        torch.cuda.synchronize()
+        return memoryview(host.numpy())
+
+    @staticmethod
+    def _to_yuv_bytes(torch, frame) -> "memoryview | bytes":
+        """BT.601 limited-range yuv420p, matching ffmpeg's default
+        rgb24 -> yuv420p conversion (measured MAE < 1 level)."""
+        from torch.nn.functional import avg_pool2d
+
+        r, g, b = frame[0, 0], frame[0, 1], frame[0, 2]
+        y = 16.0 + 219.0 * (0.299 * r + 0.587 * g + 0.114 * b)
+        u = 128.0 + 224.0 * (-0.168736 * r - 0.331264 * g + 0.5 * b)
+        v = 128.0 + 224.0 * (0.5 * r - 0.418688 * g - 0.081312 * b)
+        u = avg_pool2d(u[None, None], 2)[0, 0]
+        v = avg_pool2d(v[None, None], 2)[0, 0]
+        planes = torch.cat([
+            y.clamp(0.0, 255.0).round().to(torch.uint8).reshape(-1),
+            u.clamp(0.0, 255.0).round().to(torch.uint8).reshape(-1),
+            v.clamp(0.0, 255.0).round().to(torch.uint8).reshape(-1),
+        ])
+        if planes.device.type != "cuda":
+            return planes.cpu().numpy().tobytes()
+        host = _pinned_host(torch, tuple(planes.shape))
+        host.copy_(planes, non_blocking=True)
+        torch.cuda.synchronize()
+        return memoryview(host.numpy())
 
     @staticmethod
     def _finish_writer(writer) -> None:

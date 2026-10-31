@@ -56,8 +56,8 @@ INTERPOLATORS: dict[str, FrameInterpolator] = {
     for interp in [
         RifeTorchInterpolator(
             name="rife-v4.6",
-            label="RIFE v4.6 (CUDA)",
-            description="Optical-flow frame interpolation on the GPU, streamed between decoder and encoder. Much faster than the Vulkan build at 4K.",
+            label="RIFE v4.6 (CUDA/ROCm)",
+            description="Optical-flow frame interpolation on the GPU via PyTorch (CUDA on NVIDIA, ROCm on AMD), streamed between decoder and encoder. Much faster than the Vulkan build at 4K.",
         ),
         RifeNcnnInterpolator(
             name="rife-v4.6-vulkan",

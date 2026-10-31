@@ -31,7 +31,7 @@ and only need the container-specific steps.
 
 | Variable | Value | Why |
 |---|---|---|
-| `NVIDIA_DRIVER_CAPABILITIES` | `all` or `compute,utility,video` | Adds `video` so ffmpeg can use **NVENC**. Without it, 4K60 encoding falls back to libx264 at ~870% CPU and dominates render time. This is the single biggest speedup. |
+| `NVIDIA_DRIVER_CAPABILITIES` | `all` or `compute,utility,video` | Adds `video` so ffmpeg can use **NVENC**. Without it, 4K60 encoding falls back to libx264. After the GPU YUV + background-writer changes the CPU encoder is no longer the dominant bottleneck, but NVENC still helps. |
 | `UPSCALER_DATA_DIR` | `/workspace/upscaler-data` (default when `/workspace` exists) | Keeps job data in persistent disk. |
 
 Leave `CUDA_VISIBLE_DEVICES` **unset** for a single-GPU pod so
@@ -88,13 +88,34 @@ the exact `CUDA_VISIBLE_DEVICES` / zero-device condition — paste that here.
 - The progress line counts **source frames**; a 2x job at 7.5 source fps is
   really ~15 output fps.
 
+## 6b. Performance expectations
+
+Measured on the RTX 4090 pod, 10 s 4K30 → 60 fps, libx264 `veryfast`, CRF 20:
+
+| stage | source fps | output fps | wall |
+|---|---|---|---|
+| original CUDA path | 5.4 | 10.8 | 55 s |
+| + pinned GPU→CPU copy | 6.1 | 12.1 | 50 s |
+| + GPU RGB→YUV420p | 10.2 | 20.4 | 29 s |
+| + overlapped encode | 11.0 (12.3 steady) | 22.0 (24.6 steady) | 27 s |
+
+The RIFE forward pass alone is ~23 ms/frame (44 fps) at 4K in UHD half-res
+mode. The pipeline is now **producer-bound** (4K decode/pipe ~19 ms, H2D
+~10 ms); the encoder runs on a background thread. A 30–50% `nvidia-smi`
+reading is normal — GPU utilization is not the metric to optimize. If NVENC is
+unavailable, the CPU libx264 path still does ~52–63 fps at 4K60 because
+RGB→YUV happens on the GPU.
+
+The same PyTorch engine also runs on AMD ROCm (it implements the `torch.cuda`
+API); this runbook's NVIDIA-specific bits are the NVENC caps and CUDA wheels.
+
 ## Diagnostics cheat-sheet for "can't use device 0"
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `nvidia-smi` shows 8 GPUs but sqlite `device_count` is 1 | Multiple GPUs but only one visible to CUDA | Use `CUDA_VISIBLE_DEVICES<id>` or just pick a 1-GPU pod |
 | `torch_cuda_device_count` is `0` while `nvidia-smi` shows cards | Driver/cgroup caps hiding CUDA | Ensure pod exposes a real CUDA GPU; check driver version |
-| `/api/encoders` lacks `h264_nvenc` | `NVIDIA_DRIVER_CAPABILITIES` missing `video` | Set `all` or `compute,utility,video`, restart pod |
+| `/api/encoders` lacks `h264_nvenc` | `NVIDIA_DRIVER_CAPABILITIES` missing `video`, or `/dev/nvidia-caps` has no devices | Set `all` or `compute,utility,video` and recreate the pod (the runtime injects the cap devices at container start; exporting the env var inside a running container is not enough) |
 | `cuda:N` works on desktop but not pod | Physical vs logical id mismatch | Rely on `Auto` (cuda:0) and the diagnostics above |
 
 ## Notes
