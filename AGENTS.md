@@ -78,12 +78,16 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   `backend/engines/__init__.py`; registry order sets the UI default. Presets in
   `backend/presets.py` only bundle engine preferences, scale, filters and encode
   settings.
-- Subtitle download: `pipeline.mux_subtitles()` stream-copies the rendered
+- Output container: `encode.format` is `"mp4"` (default) or `"mkv"`. The
+  in-app player always uses the MP4; `job.download_path` picks the chosen
+  container and the other one becomes the secondary link. When the source has
+  subtitles (or MKV is chosen), `pipeline.mux_subtitles()` stream-copies the
   MP4's video/audio plus the source's subtitle/font streams into
-  `<job>/output_subs.mkv`. `job.subtitle_path` makes that MKV the default
-  download (`/api/jobs/{id}/output?download=1`), while `/output` (the player)
-  and `?download=1&mp4=1` serve the browser-playable MP4. Previews pass the
-  clip window to the mux. No video/audio re-encode.
+  `<job>/output_subs.mkv` — no video/audio re-encode. `/output?download=1`
+  returns the primary; `&mp4=1` / `&mkv=1` force one.
+- Large uploads use `/api/upload/chunk` (8 MB parts) + `/api/upload/complete`,
+  so the RunPod HTTP proxy's per-request 413 limit does not apply. Chunks are
+  assembled on disk, not in RAM. `/api/upload` remains for tests/small files.
 - Use `backend/proc.py` (`run`/`Popen`) instead of `subprocess` directly so child
   processes stay hidden in the packaged Windows app.
 
@@ -128,6 +132,8 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   the FP32 compute and 1/3 the bandwidth of an RTX 4090, so 4K RIFE is likely
   below real-time; 1080p is comfortable. Linux AMD has no VAAPI encoder in the
   candidate list (libx264); Windows AMD can use AMF (`h264_amf`/`hevc_amf`).
+- RunPod's HTTP proxy returns **413** for large single uploads; the UI uses
+  8 MB chunked uploads (`/api/upload/chunk`). Keep any new upload path chunked.
 - Encoder detection test-encodes each encoder once and caches it at
   `<data dir>/encoders.json`; delete that file to force a re-probe.
 - Job data defaults to `./data` in a checkout (`UPSCALER_DATA_DIR` overrides);

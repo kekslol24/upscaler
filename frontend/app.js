@@ -16,6 +16,7 @@ const interpModeSelect = $("interpModeSelect");
 const interpEngineSelect = $("interpEngineSelect");
 const interpHint = $("interpHint");
 const codecSelect = $("codecSelect");
+const formatSelect = $("formatSelect");
 const encoderSelect = $("encoderSelect");
 const qualityInput = $("qualityInput");
 const encoderHint = $("encoderHint");
@@ -40,7 +41,7 @@ const compareRange = $("compareRange");
 const compareDivider = $("compareDivider");
 const playPauseBtn = $("playPauseBtn");
 const downloadLink = $("downloadLink");
-const downloadMp4Link = $("downloadMp4Link");
+const downloadAltLink = $("downloadAltLink");
 const outputPath = $("outputPath");
 const beforeHint = $("beforeHint");
 let beforeTimer = null;
@@ -242,6 +243,7 @@ function applyPreset(preset) {
   updateEncoderOptions();
   encoderSelect.value = enc.encoder || "auto";
   qualityInput.value = enc.quality || 18;
+  formatSelect.value = enc.format || "mp4";
 }
 
 function markCustom() {
@@ -301,6 +303,33 @@ function setSource(job) {
   renderBtn.disabled = false;
 }
 
+const UPLOAD_CHUNK = 8 * 1024 * 1024;
+
+function newUploadId() {
+  if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function uploadSource(file) {
+  const uploadId = newUploadId();
+  const total = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK));
+  for (let i = 0; i < total; i++) {
+    const chunk = file.slice(i * UPLOAD_CHUNK, (i + 1) * UPLOAD_CHUNK);
+    const res = await fetch(
+      `/api/upload/chunk?upload_id=${uploadId}&index=${i}`,
+      { method: "POST", body: chunk },
+    );
+    if (!res.ok) throw new Error((await res.text()) || `upload chunk ${i} failed`);
+    const pct = Math.round(((i + 1) / total) * 100);
+    sourceInfo.textContent = `uploading ${file.name}… ${pct}%`;
+  }
+  return fetchJson(
+    `/api/upload/complete?upload_id=${uploadId}&filename=${encodeURIComponent(file.name)}`,
+    { method: "POST" },
+  );
+}
+
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   if (!file) return;
@@ -309,9 +338,7 @@ fileInput.addEventListener("change", async () => {
   renderBtn.disabled = true;
   sourceInfo.textContent = `uploading ${file.name}…`;
   try {
-    const formData = new FormData();
-    formData.append("file", file);
-    const job = await fetchJson("/api/upload", { method: "POST", body: formData });
+    const job = await uploadSource(file);
     setSource(job);
     loadJobs();
   } catch (err) {
@@ -331,6 +358,7 @@ function collectOptions(preview) {
     },
     encode: {
       codec: codecSelect.value,
+      format: formatSelect.value,
       encoder: encoderSelect.value,
       quality: Number(qualityInput.value),
     },
@@ -478,18 +506,24 @@ function showCompare(job) {
       }
     }, 3000);
   }
+  const mkvPrimary = job.output_format === "mkv" && job.has_subtitle_output;
   downloadLink.href = `/api/jobs/${job.id}/output?download=1`;
   downloadLink.download = job.download_filename || job.output_filename;
-  downloadLink.textContent = job.has_subtitle_output
-    ? `Download ${job.download_filename} (with subtitles)`
-    : `Download ${job.output_filename}`;
-  if (job.has_subtitle_output) {
-    downloadMp4Link.hidden = false;
-    downloadMp4Link.href = `/api/jobs/${job.id}/output?download=1&mp4=1`;
-    downloadMp4Link.download = job.output_filename;
-    downloadMp4Link.textContent = `Download ${job.output_filename} (browser)`;
+  downloadLink.textContent = `Download ${job.download_filename || job.output_filename}`
+    + (mkvPrimary ? " (with subtitles)" : "");
+  if (mkvPrimary) {
+    downloadAltLink.hidden = false;
+    downloadAltLink.href = `/api/jobs/${job.id}/output?download=1&mp4=1`;
+    downloadAltLink.download = job.output_filename;
+    downloadAltLink.textContent = `Download ${job.output_filename} (browser MP4)`;
+  } else if (job.has_subtitle_output) {
+    downloadAltLink.hidden = false;
+    downloadAltLink.href = `/api/jobs/${job.id}/output?download=1&mkv=1`;
+    downloadAltLink.download = job.subtitle_output_filename;
+    downloadAltLink.textContent =
+      `Download ${job.subtitle_output_filename} (with subtitles)`;
   } else {
-    downloadMp4Link.hidden = true;
+    downloadAltLink.hidden = true;
   }
   compareSection.hidden = false;
   playPauseBtn.textContent = "Play";

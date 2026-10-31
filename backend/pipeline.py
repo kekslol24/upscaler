@@ -88,6 +88,9 @@ class EncodeSettings:
     #: optional x264/x265 speed preset override (e.g. "veryfast" for
     #: intermediate files that are re-encoded anyway)
     preset: str | None = None
+    #: download container: "mp4" (browser-playable) or "mkv" (keeps
+    #: ASS/PGS subtitles and fonts)
+    format: str = "mp4"
 
 
 @dataclass(frozen=True)

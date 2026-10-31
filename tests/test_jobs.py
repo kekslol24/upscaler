@@ -46,6 +46,40 @@ def test_upload_probes_and_rejects_garbage(manager, tiny_video):
         manager.create_job("nope.mp4", b"not a video")
 
 
+def test_chunked_upload_assembles_chunks(manager, tiny_video):
+    data = tiny_video.read_bytes()
+    upload_id = "a" * 32
+    half = len(data) // 2
+    manager.write_upload_chunk(upload_id, 0, data[:half])
+    manager.write_upload_chunk(upload_id, 1, data[half:])
+    job = manager.create_job_from_upload(upload_id, "tiny.mkv")
+    assert job.input_path.name == "input.mkv"
+    assert (job.width, job.height) == (64, 48)
+    assert not manager.upload_dir(upload_id).exists()
+
+
+def test_chunked_upload_rejects_missing_chunk(manager, tiny_video):
+    upload_id = "b" * 32
+    manager.write_upload_chunk(upload_id, 0, tiny_video.read_bytes())
+    manager.write_upload_chunk(upload_id, 2, b"x")
+    with pytest.raises(ValueError, match="missing"):
+        manager.create_job_from_upload(upload_id, "tiny.mkv")
+
+
+def test_output_format_mkv_creates_mkv_download(manager, tiny_video, cpu_engine):
+    job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
+    manager.start(job.id, ENGINE, 2, options={
+        "encode": {"encoder": "libx264", "format": "mkv"},
+    })
+    job = _wait(manager, job.id)
+    assert job.status == "done", job.message
+    assert job.output_format == "mkv"
+    assert job.subtitle_path is not None and job.subtitle_path.exists()
+    assert job.download_filename == "tiny_x2.mkv"
+    assert job.download_path == job.subtitle_path
+    assert pipeline.probe(job.subtitle_path).width == 128
+
+
 def test_preview_then_full_render_and_persistence(manager, tiny_video, cpu_engine, tmp_path):
     job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
 
@@ -121,6 +155,8 @@ def test_start_validation(manager, tiny_video, cpu_engine):
         manager.start(job.id, ENGINE, 2, options={"clip": {"start": 5, "duration": 1}})
     with pytest.raises(ValueError):
         manager.start(job.id, ENGINE, 2, options={"encode": {"encoder": "h264_nonexistent"}})
+    with pytest.raises(ValueError):
+        manager.start(job.id, ENGINE, 2, options={"encode": {"format": "avi"}})
     with pytest.raises(ValueError):
         manager.start(job.id, "no-such-engine", 2)
 

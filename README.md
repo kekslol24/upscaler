@@ -231,25 +231,38 @@ and can be re-used as a source or viewed again.
   (NVENC / AMF / Quick Sync / VideoToolbox) with a CPU fallback. Each encoder
   is test-run once at startup so only ones that actually work are offered.
   Quality is CRF-style (18 default, lower = better).
+- **Container**: MP4 (browser-playable) or MKV (keeps ASS/PGS subtitles and
+  fonts). This is the primary download; the other container is offered as a
+  secondary link when it exists.
 - Audio is stream-copied when it is MP4-friendly (AAC/MP3/AC3) and
   transcoded to AAC otherwise (Opus/FLAC/DTS from MKV sources).
 - The before/after view gets a browser-playable H.264 proxy of the source
   window when the upload itself isn't playable (10-bit HEVC in MKV, say).
 
-### Subtitles and audio
+### Output container, subtitles and audio
 
-- The output video is always **MP4** so the in-app before/after player works
-  in every browser.
-- If the source has subtitle streams, a second **MKV** is stream-copied beside
-  it (`output_subs.mkv`) with the original subtitle and font streams plus the
-  chapters. Video/audio are copied, not re-encoded, so ASS styling and PGS
-  (signs/songs) survive. That MKV is the default download; the MP4 stays
-  available from the secondary "browser" link.
+- The **Container** control chooses the primary download: **MP4** (browser) or
+  **MKV** (keeps ASS/PGS subtitles and fonts). The in-app before/after player
+  always uses the browser-playable MP4.
+- When the source has subtitles (or MKV is chosen), the job also creates an
+  MKV by stream-copying the MP4's video/audio plus the source's subtitle and
+  font streams and the chapters. Video/audio are not re-encoded, so ASS styling
+  and PGS (signs/songs) survive.
+- The chosen container is the main download; the other one is offered as a
+  secondary link when it exists.
 - All source audio tracks are kept. MP4-safe codecs (AAC/MP3/AC3/EAC3) are
   copied; anything else (Opus/FLAC/DTS) is transcoded to AAC 192k. Track order
   is preserved and the first track is marked default.
 - Subtitles are not burned in. The MP4 itself has no subtitle stream (MP4
   cannot carry ASS/PGS); use the MKV download to keep them.
+
+### Large uploads and input formats
+
+MP4, MKV, MOV and anything else ffmpeg can decode are accepted as input. Large
+files are uploaded in **8 MB chunks** (`/api/upload/chunk`), so a reverse
+proxy's per-request body limit — including RunPod's HTTP proxy, which returns
+**413 Payload Too Large** for big single POSTs — no longer applies. The chunks
+are assembled on disk, not held in RAM.
 
 Presets live in `backend/presets.py`; a preset is just a bundle of form
 values with an engine preference list, so adding one is a few lines.

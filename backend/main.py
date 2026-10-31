@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -14,6 +15,13 @@ from .paths import FRONTEND_DIR
 from .presets import PRESETS
 
 app = FastAPI(title="4K Upscaler")
+
+_UPLOAD_ID_CHARS = frozenset("0123456789abcdef")
+
+
+def _check_upload_id(upload_id: str) -> None:
+    if len(upload_id) != 32 or any(c not in _UPLOAD_ID_CHARS for c in upload_id):
+        raise HTTPException(400, "invalid upload id")
 
 
 class StartJobRequest(BaseModel):
@@ -116,6 +124,31 @@ async def upload(file: UploadFile):
     return job.to_public_dict()
 
 
+@app.post("/api/upload/chunk")
+async def upload_chunk(request: Request, upload_id: str, index: int):
+    """One piece of a chunked upload, streamed straight to disk. Chunking
+    keeps each request under a reverse proxy's body-size limit (RunPod's
+    HTTP proxy returns 413 for large single POSTs)."""
+    _check_upload_id(upload_id)
+    if index < 0 or index > 1_000_000:
+        raise HTTPException(400, "invalid chunk index")
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "empty chunk")
+    manager.write_upload_chunk(upload_id, index, data)
+    return {"received": index}
+
+
+@app.post("/api/upload/complete")
+def upload_complete(upload_id: str, filename: str):
+    _check_upload_id(upload_id)
+    try:
+        job = manager.create_job_from_upload(upload_id, Path(filename).name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return job.to_public_dict()
+
+
 @app.post("/api/jobs/{job_id}/start")
 def start_job(job_id: str, body: StartJobRequest):
     try:
@@ -165,20 +198,21 @@ def job_before(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/output")
-def job_output(job_id: str, download: bool = False, mp4: bool = False):
+def job_output(job_id: str, download: bool = False, mp4: bool = False, mkv: bool = False):
     job = manager.get(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
     if job.output_path is None or not job.output_path.exists():
         raise HTTPException(409, "output not ready")
     if download:
-        # The default download keeps the source subtitles (stream-copied
-        # MKV); mp4=1 forces the browser-playable file.
-        path = job.output_path
-        filename = job.output_filename
-        if not mp4 and job.subtitle_path is not None and job.subtitle_path.exists():
-            path = job.subtitle_path
-            filename = job.subtitle_filename
+        # No flags: the user's chosen container. mp4=1 / mkv=1 force a
+        # specific one (the secondary download link).
+        if mp4:
+            path, filename = job.output_path, job.output_filename
+        elif mkv and job.subtitle_path is not None and job.subtitle_path.exists():
+            path, filename = job.subtitle_path, job.subtitle_filename
+        else:
+            path, filename = job.download_path, job.download_filename
         return FileResponse(path, filename=filename)
     return FileResponse(job.output_path)
 

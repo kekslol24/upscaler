@@ -32,12 +32,16 @@ further gain for this path.
 
 ## Subtitle/audio output (2026-10-31)
 
-- The player output stays MP4. When the source has subtitles, the job also
-  creates `output_subs.mkv` by stream-copying the MP4's video/audio plus the
-  source's ASS/PGS subtitle and font streams (and chapters). That MKV is the
-  default download; the MP4 is still available.
+- `encode.format` chooses the primary download: MP4 (default, browser) or MKV.
+  The in-app player always uses the MP4.
+- When the source has subtitles (or MKV is chosen), the job creates
+  `output_subs.mkv` by stream-copying the MP4's video/audio plus the source's
+  ASS/PGS subtitle and font streams (and chapters). The other container is the
+  secondary download link.
 - All audio tracks are preserved; Opus/FLAC/DTS are transcoded to AAC for MP4.
 - No video/audio re-encode: the MKV mux is a copy pass.
+- Large uploads use 8 MB chunks (`/api/upload/chunk`) so RunPod's HTTP proxy
+  no longer returns 413 for big MP4/MKV files; chunks are assembled on disk.
 
 ## AMD / ROCm (checked 2026-10-31)
 

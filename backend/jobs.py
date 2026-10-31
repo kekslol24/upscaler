@@ -106,6 +106,9 @@ class Job:
     def render_options(self) -> RenderOptions:
         f = self.options.get("filters") or {}
         e = self.options.get("encode") or {}
+        fmt = str(e.get("format", "mp4")).lower()
+        if fmt not in ("mp4", "mkv"):
+            raise ValueError("output format must be 'mp4' or 'mkv'")
         return RenderOptions(
             clip=self.clip,
             filters=Filters(
@@ -117,8 +120,14 @@ class Job:
                 codec=str(e.get("codec", "h264")),
                 encoder=str(e.get("encoder", "auto")),
                 quality=int(e.get("quality", 18)),
+                format=fmt,
             ),
         )
+
+    @property
+    def output_format(self) -> str:
+        fmt = str((self.options.get("encode") or {}).get("format", "mp4")).lower()
+        return fmt if fmt in ("mp4", "mkv") else "mp4"
 
     def _output_name(self, ext: str) -> str:
         stem = Path(self.original_filename).stem or "video"
@@ -142,13 +151,17 @@ class Job:
 
     @property
     def download_path(self) -> Optional[Path]:
-        if self.subtitle_path is not None and self.subtitle_path.exists():
+        if (self.output_format == "mkv"
+                and self.subtitle_path is not None
+                and self.subtitle_path.exists()):
             return self.subtitle_path
         return self.output_path
 
     @property
     def download_filename(self) -> str:
-        if self.subtitle_path is not None and self.subtitle_path.exists():
+        if (self.output_format == "mkv"
+                and self.subtitle_path is not None
+                and self.subtitle_path.exists()):
             return self.subtitle_filename
         return self.output_filename
 
@@ -177,6 +190,7 @@ class Job:
                 else None
             ),
             "download_filename": self.download_filename,
+            "output_format": self.output_format,
             "created_at": self.created_at,
         }
 
@@ -288,6 +302,7 @@ class JobManager:
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._init_db()
         self._load()
+        self._cleanup_uploads()
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
@@ -329,6 +344,24 @@ class JobManager:
 
     # -- API ------------------------------------------------------------
 
+    def _register_job(self, original_filename: str, job_dir: Path, input_path: Path) -> Job:
+        original_filename = Path(original_filename).name or "input.mp4"
+        try:
+            info = pipeline.probe(input_path)
+        except Exception as exc:  # noqa: BLE001 - ffprobe failure or no video stream
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise ValueError(f"not a readable video: {exc}") from exc
+
+        job = Job(
+            id=job_dir.name, dir=job_dir, input_path=input_path,
+            original_filename=original_filename,
+            duration=info.duration, width=info.width, height=info.height,
+        )
+        with self._lock:
+            self._jobs[job.id] = job
+        self._save(job)
+        return job
+
     def create_job(self, original_filename: str, data: bytes) -> Job:
         job_id = uuid.uuid4().hex
         job_dir = self.data_dir / job_id
@@ -337,22 +370,49 @@ class JobManager:
         suffix = Path(original_filename).suffix or ".mp4"
         input_path = job_dir / f"input{suffix}"
         input_path.write_bytes(data)
+        return self._register_job(original_filename, job_dir, input_path)
 
-        try:
-            info = pipeline.probe(input_path)
-        except Exception as exc:  # noqa: BLE001 - ffprobe failure or no video stream
-            shutil.rmtree(job_dir, ignore_errors=True)
-            raise ValueError(f"not a readable video: {exc}") from exc
+    def upload_dir(self, upload_id: str) -> Path:
+        return self.data_dir / "uploads" / upload_id
 
-        job = Job(
-            id=job_id, dir=job_dir, input_path=input_path,
-            original_filename=original_filename,
-            duration=info.duration, width=info.width, height=info.height,
-        )
-        with self._lock:
-            self._jobs[job_id] = job
-        self._save(job)
-        return job
+    def write_upload_chunk(self, upload_id: str, index: int, data: bytes) -> None:
+        """Append one chunk of a large upload to disk (no whole-file RAM)."""
+        target = self.upload_dir(upload_id)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / f"{index:06d}.part").write_bytes(data)
+
+    def create_job_from_upload(self, upload_id: str, filename: str) -> Job:
+        """Assemble the uploaded chunks into a job input and probe it."""
+        upload = self.upload_dir(upload_id)
+        parts = sorted(upload.glob("*.part"))
+        if not parts:
+            raise ValueError("no chunks uploaded")
+        if [int(part.stem) for part in parts] != list(range(len(parts))):
+            raise ValueError("missing upload chunk")
+
+        job_id = uuid.uuid4().hex
+        job_dir = self.data_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(filename).suffix or ".mp4"
+        input_path = job_dir / f"input{suffix}"
+        with input_path.open("wb") as out:
+            for part in parts:
+                with part.open("rb") as src:
+                    shutil.copyfileobj(src, out, 1024 * 1024)
+        shutil.rmtree(upload, ignore_errors=True)
+        return self._register_job(filename, job_dir, input_path)
+
+    def _cleanup_uploads(self) -> None:
+        root = self.data_dir / "uploads"
+        if not root.exists():
+            return
+        cutoff = time.time() - 24 * 3600
+        for item in root.iterdir():
+            try:
+                if item.is_dir() and item.stat().st_mtime < cutoff:
+                    shutil.rmtree(item, ignore_errors=True)
+            except OSError:
+                pass
 
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
@@ -428,6 +488,14 @@ class JobManager:
         job.progress = 0
         job.message = "queued"
         job.output_path = None
+        # Drop the previous run's derived files so a stale subtitle copy or
+        # comparison proxy is never served for the new settings.
+        if job.subtitle_path is not None:
+            job.subtitle_path.unlink(missing_ok=True)
+            job.subtitle_path = None
+        if job.before_path is not None:
+            job.before_path.unlink(missing_ok=True)
+            job.before_path = None
         job.cancel_requested.clear()
         self._save(job)
         self._queue.put(job_id)
@@ -483,7 +551,8 @@ class JobManager:
         """Stream-copy the source's subtitles/fonts into an MKV beside the
         browser-playable MP4. Returns an error string on failure; the MP4
         stays valid and downloadable either way."""
-        if not pipeline.has_subtitles(job.input_path):
+        need_mkv = job.output_format == "mkv" or pipeline.has_subtitles(job.input_path)
+        if not need_mkv:
             return None
         target = job.dir / ("preview_subs.mkv" if job.clip else "output_subs.mkv")
         job.message = "muxing subtitles"
