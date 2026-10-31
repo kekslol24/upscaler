@@ -287,6 +287,12 @@ RTX 4090 a 4K pair takes ~23 ms in UHD half-resolution mode; end-to-end
 up from ~5.4 source fps before these fixes. Interpolation-only renders bypass
 the chunked pipeline completely.
 
+When both upscaling and interpolation are selected, the stage order is
+automatic: a streaming upscaler (ONNX) interpolates at source resolution
+first and then upscales; a directory-mode ncnn/Vulkan upscaler upscales
+first and then interpolates. That keeps RIFE off 4K frames on the fast path
+and avoids doubling the slow ncnn upscaler's frame count.
+
 The Vulkan fallback (`rife-ncnn-vulkan`, downloaded into `engines_bin/rife/`)
 still exists for machines without PyTorch/CUDA/ROCm. Renders that use a
 directory-mode stage (the Vulkan interpolator or an ncnn upscaler) go through

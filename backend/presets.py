@@ -73,7 +73,7 @@ PRESETS: list[Preset] = [
     Preset(
         name="anime-4k-60fps",
         label="Anime — 4K + smooth 2x frame rate",
-        description="Upscale, then RIFE doubles the frame rate (24 → 48 fps) for smoother motion. Audio is kept.",
+        description="Upscale and RIFE-double the frame rate (24 → 48 fps) for smoother motion. Audio is kept.",
         engines=_ANIME_VIDEO,
         scale=2,
         interpolate={"engine": _RIFE, "factor": 2, "mode": "smooth"},

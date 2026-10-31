@@ -78,6 +78,10 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   (ncnn engines or the Vulkan interpolator) still use the chunked pipeline in
   `jobs.py` (5-second chunks, one-frame overlap, bounded disk use). Do not
   replace it with whole-video frame extraction.
+- Combined render order: `_stage_order()` puts interpolation before upscaling
+  for streaming upscalers (RIFE at source resolution, then upscale the extra
+  frames) and upscaling before interpolation for directory-mode ncnn/Vulkan
+  upscalers (avoid doubling the slow upscaler's frame count).
 - Engines implement `backend/engines/base.py` and are registered in
   `backend/engines/__init__.py`; registry order sets the UI default. Presets in
   `backend/presets.py` only bundle engine preferences, scale, filters and encode
