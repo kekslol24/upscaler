@@ -61,6 +61,7 @@ def list_engines():
             "description": engine.description,
             "available": engine.is_available(),
             "reason": engine.unavailable_reason(),
+            "runtime": getattr(engine, "runtime", None),
             "supported_scales": list(engine.supported_scales),
         }
         for engine in REGISTRY.values()

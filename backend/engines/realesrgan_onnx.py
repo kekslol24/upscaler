@@ -23,18 +23,33 @@ from __future__ import annotations
 import os
 import queue
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
 from .. import pipeline
-from ..paths import MODELS_DIR
+from ..paths import DATA_DIR, MODELS_DIR
 from ..pipeline import RenderOptions, VideoInfo
 from .base import JobCancelled, ProgressCallback, UpscaleEngine
 _GPU_PROVIDERS = ("DmlExecutionProvider", "CUDAExecutionProvider", "ROCMExecutionProvider")
 #: set UPSCALER_ALLOW_CPU=1 to run on the CPU provider (tests, GPU-less
 #: machines) — roughly 20 s per 1080p frame, so refused by default
 _ALLOW_CPU_ENV = "UPSCALER_ALLOW_CPU"
+#: "default" keeps the normal provider; "tensorrt" opts into TensorRT with
+#: CUDA fallback; "auto" uses TensorRT when available.
+_PROVIDER_ENV = "UPSCALER_ONNX_PROVIDER"
+_TRT_INPUT = "frame"
 _QUEUE_DEPTH = 4
+
+
+def _provider_mode() -> str:
+    return os.environ.get(_PROVIDER_ENV, "default").strip().lower()
+
+
+def _trt_cache_dir() -> Path:
+    path = DATA_DIR / "trt-cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 # Safety valve: frames can be processed in overlapping full-width
 # horizontal bands whose output stays under this many bytes (0 = whole
@@ -105,7 +120,7 @@ class RealEsrganOnnxEngine(UpscaleEngine):
         self.model_prefix = model_prefix
         self.description = description
         self.supported_scales = supported_scales
-        self._sessions: dict[tuple[int, int | None], object] = {}
+        self._sessions: dict[tuple, object] = {}
         self._lock = threading.Lock()
 
     # -- availability -----------------------------------------------------
@@ -113,15 +128,67 @@ class RealEsrganOnnxEngine(UpscaleEngine):
     def _model_path(self, scale: int) -> Path:
         return MODELS_DIR / f"{self.model_prefix}-x{scale}.onnx"
 
-    def _gpu_provider(self) -> str | None:
+    def _trt_enabled(self) -> bool:
         ort = _onnxruntime()
         if ort is None:
-            return None
+            return False
         available = ort.get_available_providers()
+        return (
+            _provider_mode() in ("auto", "tensorrt")
+            and "TensorrtExecutionProvider" in available
+            and "CUDAExecutionProvider" in available
+            and _MAX_OUTPUT_BYTES <= 0
+        )
+
+    def _has_gpu_provider(self) -> bool:
+        ort = _onnxruntime()
+        if ort is None:
+            return False
+        if self._trt_enabled():
+            return True
+        available = ort.get_available_providers()
+        return any(p in available for p in _GPU_PROVIDERS)
+
+    def _provider_chain(self, gpu_id: int | None, width: int, height: int):
+        ort = _onnxruntime()
+        available = ort.get_available_providers()
+        if self._trt_enabled():
+            shape = f"{_TRT_INPUT}:1x{height}x{width}x3"
+            cache = str(_trt_cache_dir())
+            return [
+                ("TensorrtExecutionProvider", {
+                    "device_id": gpu_id or 0,
+                    "trt_fp16_enable": True,
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": cache,
+                    "trt_timing_cache_enable": True,
+                    "trt_timing_cache_path": cache,
+                    "trt_builder_optimization_level": 3,
+                    "trt_max_workspace_size": 2 * 1024 * 1024 * 1024,
+                    "trt_profile_min_shapes": shape,
+                    "trt_profile_opt_shapes": shape,
+                    "trt_profile_max_shapes": shape,
+                }),
+                ("CUDAExecutionProvider", {"device_id": gpu_id or 0}),
+            ]
+        if _provider_mode() == "tensorrt":
+            if _MAX_OUTPUT_BYTES > 0:
+                print("TensorRT disabled: banding is enabled; using the default provider.",
+                      file=sys.stderr)
+            else:
+                print("TensorRT requested but unavailable; using the default provider.",
+                      file=sys.stderr)
         provider = next((p for p in _GPU_PROVIDERS if p in available), None)
         if provider is None and os.environ.get(_ALLOW_CPU_ENV) == "1":
             provider = "CPUExecutionProvider"
-        return provider
+        if provider is None:
+            return []
+        device = {} if gpu_id is None or provider == "CPUExecutionProvider" else {"device_id": gpu_id}
+        return [(provider, device)]
+
+    @property
+    def runtime(self) -> str:
+        return _provider_mode()
 
     def is_available(self) -> bool:
         return self.unavailable_reason() is None
@@ -129,7 +196,7 @@ class RealEsrganOnnxEngine(UpscaleEngine):
     def unavailable_reason(self) -> str | None:
         if _onnxruntime() is None:
             return "onnxruntime not installed — pip install -r requirements.txt"
-        if self._gpu_provider() is None:
+        if not self._has_gpu_provider():
             return ("onnxruntime has no GPU provider — needs onnxruntime-directml "
                     f"(Windows) or onnxruntime-gpu (Linux); set {_ALLOW_CPU_ENV}=1 "
                     "to run (very slowly) on the CPU")
@@ -138,19 +205,43 @@ class RealEsrganOnnxEngine(UpscaleEngine):
                 return f"model file missing: {self._model_path(scale)}"
         return None
 
-    def _session(self, scale: int, gpu_id: int | None):
+    def _session(self, scale: int, gpu_id: int | None, width: int, height: int):
         ort = _onnxruntime()
-        key = (scale, gpu_id)
+        use_trt = self._trt_enabled()
+        key = (scale, gpu_id, width, height) if use_trt else (scale, gpu_id)
         with self._lock:
             session = self._sessions.get(key)
             if session is None:
                 options = ort.SessionOptions()
                 options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                name = self._gpu_provider()
-                device = {} if gpu_id is None or name == "CPUExecutionProvider" else {"device_id": gpu_id}
-                session = ort.InferenceSession(str(self._model_path(scale)), options, providers=[(name, device)])
+                providers = self._provider_chain(gpu_id, width, height)
+                if not providers:
+                    raise RuntimeError("no ONNX provider available")
+                name = providers[0][0]
+                try:
+                    session = ort.InferenceSession(
+                        str(self._model_path(scale)), options, providers=providers
+                    )
+                except Exception:
+                    if name != "TensorrtExecutionProvider":
+                        raise
+                    print("TensorRT session failed; falling back to CUDA.",
+                          file=sys.stderr)
+                    session = ort.InferenceSession(
+                        str(self._model_path(scale)), options,
+                        providers=[("CUDAExecutionProvider", {"device_id": gpu_id or 0})],
+                    )
+                    name = "CUDAExecutionProvider"
                 active = session.get_providers()
-                if name != "CPUExecutionProvider" and (not active or active[0] != name):
+                if name == "TensorrtExecutionProvider":
+                    # Partial TRT + CUDA fallback is fine; a pure CPU
+                    # fallback is not.
+                    if not active or active[0] == "CPUExecutionProvider":
+                        raise RuntimeError(
+                            f"TensorRT failed for the x{scale} model; ONNX Runtime "
+                            f"fell back to {active[0] if active else 'no provider'}."
+                        )
+                elif name != "CPUExecutionProvider" and (not active or active[0] != name):
                     # ORT logs a warning and silently runs on the CPU when a
                     # provider library fails to load. A render would then take
                     # minutes per frame instead of seconds — fail clearly.
@@ -277,7 +368,7 @@ class RealEsrganOnnxEngine(UpscaleEngine):
         options: RenderOptions | None = None,
     ) -> None:
         options = options or RenderOptions()
-        session = self._session(scale, gpu_id)
+        session = self._session(scale, gpu_id, info.width, info.height)
         reader = pipeline.open_frame_reader(input_path, options)
         writer = pipeline.open_frame_writer(
             output_path, info.width * scale, info.height * scale, info.frame_rate,
@@ -329,7 +420,7 @@ class RealEsrganOnnxEngine(UpscaleEngine):
         if not frames:
             raise RuntimeError(f"no PNG frames in {in_dir}")
         info = pipeline.probe(frames[0])
-        session = self._session(scale, gpu_id)
+        session = self._session(scale, gpu_id, info.width, info.height)
         reader = pipeline.open_frame_reader(in_dir / "%08d.png")
         writer = pipeline.open_frame_writer(
             target, info.width * scale, info.height * scale, frame_rate,

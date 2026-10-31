@@ -307,6 +307,22 @@ interpolator sees every frame pair.
 | RIFE v4.6 (CUDA/ROCm) | PyTorch on CUDA or ROCm, streaming | frame interpolation, fastest |
 | RIFE v4.6 (Vulkan) | ncnn binary | frame interpolation, portable fallback |
 
+### TensorRT (optional, CUDA)
+
+Set `UPSCALER_ONNX_PROVIDER=tensorrt` before `run.sh` to run the ONNX
+upscaler through TensorRT (FP16) with a CUDA fallback:
+
+```bash
+UPSCALER_ONNX_PROVIDER=tensorrt ./scripts/run.sh
+```
+
+The first render at a given resolution builds a TensorRT engine under
+`<data dir>/trt-cache` (this can take a minute or two); later renders reuse
+it. `UPSCALER_ONNX_PROVIDER=default` (the default) keeps the normal
+CUDA/DirectML/ROCm provider, and `auto` uses TensorRT when it is available.
+TensorRT is CUDA-only, so DirectML/ROCm machines are unaffected. The chosen
+mode is shown as `runtime` in `GET /api/engines`.
+
 ## Desktop build (Windows .exe / installer)
 
 ```powershell
