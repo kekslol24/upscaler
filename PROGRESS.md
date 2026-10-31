@@ -43,16 +43,6 @@ further gain for this path.
 - Large uploads use 8 MB chunks (`/api/upload/chunk`) so RunPod's HTTP proxy
   no longer returns 413 for big MP4/MKV files; chunks are assembled on disk.
 
-## TensorRT option (2026-10-31)
-
-- `UPSCALER_ONNX_PROVIDER=tensorrt` runs the ONNX upscaler through TensorRT
-  (FP16) with a CUDA fallback; engines are cached in `<data dir>/trt-cache`.
-  The default stays the normal provider.
-- Measured on the RTX 4090, 1080p→4K: CUDA 69.8 ms (14.3 fps); TensorRT with
-  a float16-in/float16-out model variant 75.1 ms (13.3 fps) = 0.93x, MAE 0.34.
-  The shipped uint8-output model is rejected by TensorRT outright (uint8
-  intermediate tensors). TensorRT is not worth enabling for this model.
-
 ## AMD / ROCm (checked 2026-10-31)
 
 - The PyTorch RIFE path is not CUDA-specific: ROCm PyTorch implements the

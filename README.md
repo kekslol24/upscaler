@@ -313,30 +313,6 @@ interpolator sees every frame pair.
 | RIFE v4.6 (CUDA/ROCm) | PyTorch on CUDA or ROCm, streaming | frame interpolation, fastest |
 | RIFE v4.6 (Vulkan) | ncnn binary | frame interpolation, portable fallback |
 
-### TensorRT (optional, CUDA)
-
-Set `UPSCALER_ONNX_PROVIDER=tensorrt` before `run.sh` to try the ONNX
-upscaler through TensorRT (FP16) with a CUDA fallback:
-
-```bash
-UPSCALER_ONNX_PROVIDER=tensorrt ./scripts/run.sh
-```
-
-The first render at a given resolution builds a TensorRT engine under
-`<data dir>/trt-cache` (this can take a minute or two); later renders reuse
-it. `UPSCALER_ONNX_PROVIDER=default` (the default) keeps the normal
-CUDA/DirectML/ROCm provider, and `auto` uses TensorRT when it is available.
-The chosen mode is shown as `runtime` in `GET /api/engines`.
-
-**Measured on the RTX 4090 (1080p→4K anime model): TensorRT is not faster.**
-The shipped model ends in a `uint8` cast, which TensorRT rejects (“UINT8
-intermediate tensors”), so it falls back to CUDA. A float16-in/float16-out
-variant ran at **75.1 ms/frame (13.3 fps)** versus **69.8 ms (14.3 fps)** on
-CUDA — **0.93x**, with a 0.34-level MAE. Keep the default CUDA provider for
-this model; the option remains for experimentation and other models. TensorRT
-also needs its runtime libraries (`pip install tensorrt-cu12`) and
-`LD_LIBRARY_PATH` pointing at the `tensorrt_libs` directory.
-
 ## Desktop build (Windows .exe / installer)
 
 ```powershell

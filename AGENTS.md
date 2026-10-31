@@ -30,13 +30,6 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   only verification.
 - Headless/container: `./scripts/run.sh` binds `0.0.0.0:8000` and keeps data in
   `/workspace/upscaler-data` when `/workspace` exists.
-- Optional TensorRT: `UPSCALER_ONNX_PROVIDER=tensorrt ./scripts/run.sh` uses
-  the TensorRT EP (FP16) with a CUDA fallback; engines are cached in
-  `<data dir>/trt-cache` and the first render per resolution is slow. The
-  default is `default` (normal provider); `auto` uses TRT when available.
-  Measured on the 4090: **slower than CUDA** for the shipped uint8-output
-  model (TensorRT rejects uint8 intermediates); a float16 I/O variant was
-  0.93x. Keep CUDA for this model.
 - Per-stage throughput: `.venv/bin/python scripts/bench.py [video]`.
 
 ## RIFE implementation (current)
@@ -145,10 +138,6 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   candidate list (libx264); Windows AMD can use AMF (`h264_amf`/`hevc_amf`).
 - RunPod's HTTP proxy returns **413** for large single uploads; the UI uses
   8 MB chunked uploads (`/api/upload/chunk`). Keep any new upload path chunked.
-- TensorRT EP is CUDA-only and is skipped when `UPSCALER_BAND_OUTPUT_BYTES`
-  enables banding (the input shape changes per band). The first run per
-  resolution builds an engine under `<data dir>/trt-cache`; delete that cache
-  to force a rebuild.
 - Encoder detection test-encodes each encoder once and caches it at
   `<data dir>/encoders.json`; delete that file to force a re-probe.
 - Job data defaults to `./data` in a checkout (`UPSCALER_DATA_DIR` overrides);
