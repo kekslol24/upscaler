@@ -30,6 +30,15 @@ RIFE forward ~30 ms, 4K decode/read ~19 ms, H2D ~10 ms per source frame. The
 encoder now overlaps and is no longer the limit, so NVENC would give little
 further gain for this path.
 
+## Subtitle/audio output (2026-10-31)
+
+- The player output stays MP4. When the source has subtitles, the job also
+  creates `output_subs.mkv` by stream-copying the MP4's video/audio plus the
+  source's ASS/PGS subtitle and font streams (and chapters). That MKV is the
+  default download; the MP4 is still available.
+- All audio tracks are preserved; Opus/FLAC/DTS are transcoded to AAC for MP4.
+- No video/audio re-encode: the MKV mux is a copy pass.
+
 ## AMD / ROCm (checked 2026-10-31)
 
 - The PyTorch RIFE path is not CUDA-specific: ROCm PyTorch implements the

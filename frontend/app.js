@@ -40,6 +40,7 @@ const compareRange = $("compareRange");
 const compareDivider = $("compareDivider");
 const playPauseBtn = $("playPauseBtn");
 const downloadLink = $("downloadLink");
+const downloadMp4Link = $("downloadMp4Link");
 const outputPath = $("outputPath");
 const beforeHint = $("beforeHint");
 let beforeTimer = null;
@@ -478,8 +479,18 @@ function showCompare(job) {
     }, 3000);
   }
   downloadLink.href = `/api/jobs/${job.id}/output?download=1`;
-  downloadLink.download = job.output_filename;
-  downloadLink.textContent = `Download ${job.output_filename}`;
+  downloadLink.download = job.download_filename || job.output_filename;
+  downloadLink.textContent = job.has_subtitle_output
+    ? `Download ${job.download_filename} (with subtitles)`
+    : `Download ${job.output_filename}`;
+  if (job.has_subtitle_output) {
+    downloadMp4Link.hidden = false;
+    downloadMp4Link.href = `/api/jobs/${job.id}/output?download=1&mp4=1`;
+    downloadMp4Link.download = job.output_filename;
+    downloadMp4Link.textContent = `Download ${job.output_filename} (browser)`;
+  } else {
+    downloadMp4Link.hidden = true;
+  }
   compareSection.hidden = false;
   playPauseBtn.textContent = "Play";
   setSlider(50);

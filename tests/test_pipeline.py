@@ -52,6 +52,31 @@ def test_encode_args_unknown_codec_fails():
         pipeline.resolve_encoder(EncodeSettings(codec="av1"))
 
 
+def test_mux_subtitles_keeps_text_subtitles(tiny_video, tmp_path):
+    """The download copy is an MKV with the source subtitle streams copied."""
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:00,500\nHello\n", encoding="utf-8")
+    source = tmp_path / "with_subs.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(tiny_video), "-i", str(srt),
+         "-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt", str(source)],
+        check=True,
+    )
+    assert pipeline.has_subtitles(source)
+    assert not pipeline.has_subtitles(tiny_video)
+
+    out = tmp_path / "out.mkv"
+    pipeline.mux_subtitles(tiny_video, source, out)
+    assert pipeline.has_subtitles(out)
+    codec = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s:0",
+         "-show_entries", "stream=codec_name", "-of",
+         "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert codec in ("subrip", "ass")
+
+
 def test_streaming_roundtrip_with_clip_and_filters(tiny_video, tmp_path):
     """Decode a clip with a pre-filter, pass frames straight through, and
     encode with a post-filter + transcoded audio."""

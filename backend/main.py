@@ -165,14 +165,21 @@ def job_before(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/output")
-def job_output(job_id: str, download: bool = False):
+def job_output(job_id: str, download: bool = False, mp4: bool = False):
     job = manager.get(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
     if job.output_path is None or not job.output_path.exists():
         raise HTTPException(409, "output not ready")
     if download:
-        return FileResponse(job.output_path, filename=job.output_filename)
+        # The default download keeps the source subtitles (stream-copied
+        # MKV); mp4=1 forces the browser-playable file.
+        path = job.output_path
+        filename = job.output_filename
+        if not mp4 and job.subtitle_path is not None and job.subtitle_path.exists():
+            path = job.subtitle_path
+            filename = job.subtitle_filename
+        return FileResponse(path, filename=filename)
     return FileResponse(job.output_path)
 
 

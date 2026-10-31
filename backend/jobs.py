@@ -86,6 +86,8 @@ class Job:
     output_path: Optional[Path] = None
     #: browser-playable "before" video for the compare view
     before_path: Optional[Path] = None
+    #: MKV with the source's subtitles/fonts stream-copied in (download)
+    subtitle_path: Optional[Path] = None
     created_at: float = field(default_factory=time.time)
     cancel_requested: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -118,8 +120,7 @@ class Job:
             ),
         )
 
-    @property
-    def output_filename(self) -> str:
+    def _output_name(self, ext: str) -> str:
         stem = Path(self.original_filename).stem or "video"
         parts = []
         if self.scale and self.scale > 1:
@@ -129,7 +130,27 @@ class Job:
             parts.append(f"{interp.mode}{interp.factor}x")
         if self.clip:
             parts.append("preview")
-        return "_".join([stem, *parts]) + ".mp4"
+        return "_".join([stem, *parts]) + ext
+
+    @property
+    def output_filename(self) -> str:
+        return self._output_name(".mp4")
+
+    @property
+    def subtitle_filename(self) -> str:
+        return self._output_name(".mkv")
+
+    @property
+    def download_path(self) -> Optional[Path]:
+        if self.subtitle_path is not None and self.subtitle_path.exists():
+            return self.subtitle_path
+        return self.output_path
+
+    @property
+    def download_filename(self) -> str:
+        if self.subtitle_path is not None and self.subtitle_path.exists():
+            return self.subtitle_filename
+        return self.output_filename
 
     def to_public_dict(self) -> dict:
         return {
@@ -149,6 +170,13 @@ class Job:
             "output_path": str(self.output_path) if self.output_path and self.output_path.exists() else None,
             "before_ready": self.before_path is not None and self.before_path.exists(),
             "output_filename": self.output_filename,
+            "has_subtitle_output": self.subtitle_path is not None and self.subtitle_path.exists(),
+            "subtitle_output_filename": (
+                self.subtitle_filename
+                if self.subtitle_path is not None and self.subtitle_path.exists()
+                else None
+            ),
+            "download_filename": self.download_filename,
             "created_at": self.created_at,
         }
 
@@ -172,6 +200,7 @@ class Job:
             "height": self.height,
             "output_path": str(self.output_path) if self.output_path else None,
             "before_path": str(self.before_path) if self.before_path else None,
+            "subtitle_path": str(self.subtitle_path) if self.subtitle_path else None,
             "created_at": self.created_at,
         }
 
@@ -194,6 +223,7 @@ class Job:
             height=int(rec.get("height", 0)),
             output_path=Path(rec["output_path"]) if rec.get("output_path") else None,
             before_path=Path(rec["before_path"]) if rec.get("before_path") else None,
+            subtitle_path=Path(rec["subtitle_path"]) if rec.get("subtitle_path") else None,
             created_at=float(rec.get("created_at", time.time())),
         )
 
@@ -444,7 +474,25 @@ class JobManager:
         if job.output_path is not None:
             job.output_path.unlink(missing_ok=True)
             job.output_path = None
+        if job.subtitle_path is not None:
+            job.subtitle_path.unlink(missing_ok=True)
+            job.subtitle_path = None
         shutil.rmtree(job.dir / "work", ignore_errors=True)
+
+    def _mux_subtitles(self, job: Job, output_path: Path) -> str | None:
+        """Stream-copy the source's subtitles/fonts into an MKV beside the
+        browser-playable MP4. Returns an error string on failure; the MP4
+        stays valid and downloadable either way."""
+        if not pipeline.has_subtitles(job.input_path):
+            return None
+        target = job.dir / ("preview_subs.mkv" if job.clip else "output_subs.mkv")
+        job.message = "muxing subtitles"
+        try:
+            pipeline.mux_subtitles(output_path, job.input_path, target, job.clip)
+        except Exception as exc:  # noqa: BLE001 - the render itself succeeded
+            return str(exc)
+        job.subtitle_path = target
+        return None
 
     def _process(self, job: Job) -> None:
         job.status = "running"
@@ -478,18 +526,26 @@ class JobManager:
         if job.cancel_requested.is_set():
             raise JobCancelled()
 
+        subtitle_error = self._mux_subtitles(job, output_path)
+        if job.cancel_requested.is_set():
+            raise JobCancelled()
+        done_message = (
+            "done" if not subtitle_error
+            else f"done (subtitle copy failed: {subtitle_error})"
+        )
+
         if options.clip is not None:
             # previews are short: build the matching source clip before reporting done
             job.before_path = self._before_video(job, options.clip)
             job.progress = 100
-            self._finish(job, "done", "done")
+            self._finish(job, "done", done_message)
             return
         # a full render is done — and downloadable — as soon as the file is;
         # the browser-playable copy of the source for the compare view can
         # take minutes for a long episode, so it is built afterwards
         job.before_path = None
         job.progress = 100
-        self._finish(job, "done", "done")
+        self._finish(job, "done", done_message)
         try:
             job.before_path = self._before_video(job, None)
         except Exception as exc:  # noqa: BLE001 - the render itself succeeded

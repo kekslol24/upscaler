@@ -236,6 +236,21 @@ and can be re-used as a source or viewed again.
 - The before/after view gets a browser-playable H.264 proxy of the source
   window when the upload itself isn't playable (10-bit HEVC in MKV, say).
 
+### Subtitles and audio
+
+- The output video is always **MP4** so the in-app before/after player works
+  in every browser.
+- If the source has subtitle streams, a second **MKV** is stream-copied beside
+  it (`output_subs.mkv`) with the original subtitle and font streams plus the
+  chapters. Video/audio are copied, not re-encoded, so ASS styling and PGS
+  (signs/songs) survive. That MKV is the default download; the MP4 stays
+  available from the secondary "browser" link.
+- All source audio tracks are kept. MP4-safe codecs (AAC/MP3/AC3/EAC3) are
+  copied; anything else (Opus/FLAC/DTS) is transcoded to AAC 192k. Track order
+  is preserved and the first track is marked default.
+- Subtitles are not burned in. The MP4 itself has no subtitle stream (MP4
+  cannot carry ASS/PGS); use the MKV download to keep them.
+
 Presets live in `backend/presets.py`; a preset is just a bundle of form
 values with an engine preference list, so adding one is a few lines.
 

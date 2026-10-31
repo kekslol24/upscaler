@@ -495,6 +495,54 @@ def is_browser_playable(input_path: Path) -> bool:
     )
 
 
+def has_subtitles(path: Path) -> bool:
+    """True if the file has at least one subtitle stream."""
+    try:
+        out = proc.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "s",
+                "-show_entries", "stream=index", "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return False
+    return bool(out.strip())
+
+
+def mux_subtitles(
+    video_path: Path,
+    source_path: Path,
+    output_path: Path,
+    clip: Clip | None = None,
+) -> None:
+    """Copy the rendered video/audio plus the source's subtitle and font
+    streams into an MKV. Nothing is re-encoded, so ASS/PGS styling and
+    fonts survive; MP4 cannot carry those codecs."""
+    _require_ffmpeg()
+    base = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path)]
+    if clip is not None:
+        # input options apply to the next -i (the subtitle source)
+        base += ["-ss", f"{clip.start:.3f}", "-t", f"{clip.duration:.3f}"]
+    base += [
+        "-i", str(source_path),
+        "-map", "0:v:0", "-map", "0:a?",
+        "-map", "1:s?", "-map", "1:t?",
+        "-map_chapters", "0",
+    ]
+    try:
+        proc.run([*base, "-c", "copy", str(output_path)],
+                 capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError:
+        # e.g. mov_text (MP4) -> Matroska: convert text subtitles to ASS.
+        proc.run(
+            [*base, "-c:v", "copy", "-c:a", "copy", "-c:t", "copy",
+             "-c:s", "ass", str(output_path)],
+            capture_output=True, text=True, check=True,
+        )
+
+
 def make_proxy(input_path: Path, output_path: Path, clip: Clip | None = None) -> None:
     """Quick browser-playable H.264 copy of the source (or of a clip of
     it) for the before/after view — the upload itself may be 10-bit HEVC

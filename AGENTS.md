@@ -78,6 +78,12 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   `backend/engines/__init__.py`; registry order sets the UI default. Presets in
   `backend/presets.py` only bundle engine preferences, scale, filters and encode
   settings.
+- Subtitle download: `pipeline.mux_subtitles()` stream-copies the rendered
+  MP4's video/audio plus the source's subtitle/font streams into
+  `<job>/output_subs.mkv`. `job.subtitle_path` makes that MKV the default
+  download (`/api/jobs/{id}/output?download=1`), while `/output` (the player)
+  and `?download=1&mp4=1` serve the browser-playable MP4. Previews pass the
+  clip window to the mux. No video/audio re-encode.
 - Use `backend/proc.py` (`run`/`Popen`) instead of `subprocess` directly so child
   processes stay hidden in the packaged Windows app.
 
