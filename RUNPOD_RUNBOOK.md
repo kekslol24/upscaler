@@ -35,8 +35,8 @@ and only need the container-specific steps.
 | `NVIDIA_DRIVER_CAPABILITIES` | `all` or `compute,utility,video` | Adds `video` so ffmpeg can use **NVENC**. Without it, 4K60 encoding falls back to libx264. After the GPU YUV + background-writer changes the CPU encoder is no longer the dominant bottleneck, but NVENC still helps. |
 | `UPSCALER_DATA_DIR` | `/workspace/upscaler-data` (default when `/workspace` exists) | Keeps job data in persistent disk. |
 
-Leave `CUDA_VISIBLE_DEVICES` **unset** for a single-GPU pod so
-`cuda:0 == the only GPU`.
+Leave `CUDA_VISIBLE_DEVICES` **unset** so the app sees every GPU; the worker
+pool runs one render per GPU. Set it only to restrict the app to a subset.
 
 ## 2. Get the repo onto the pod
 
@@ -109,6 +109,28 @@ RGB→YUV happens on the GPU.
 
 The same PyTorch engine also runs on AMD ROCm (it implements the `torch.cuda`
 API); this runbook's NVIDIA-specific bits are the NVENC caps and CUDA wheels.
+
+## 6c. Two or more GPUs
+
+The app starts one worker thread per detected GPU automatically; no extra
+config is needed.
+
+- Create the pod with N GPUs, a PyTorch template, and
+  `NVIDIA_DRIVER_CAPABILITIES=all` (or `compute,utility,video`).
+- Clone, setup and run exactly as above. `curl -s
+  http://127.0.0.1:8000/api/gpus` should list all N GPUs.
+- In the UI, leave **GPU** on **Auto**, select multiple episodes, and click
+  **Render all uploaded**. Auto gives each job to the least-loaded GPU and
+  queues extras behind busy ones. Pick a GPU explicitly to pin one episode.
+- `UPSCALER_WORKERS=N` caps concurrent workers (default: all GPUs) if the
+  pod's CPU or disk cannot feed them. One concurrent 4K encode uses ~4–5 CPU
+  cores, and disk usage scales with the number of outputs.
+- NVENC needs the `video` driver capability on every GPU; without it the
+  jobs fall back to libx264 and compete for CPU. Check `/api/encoders`.
+- The worker count is fixed at startup; restart the app if you add/remove
+  GPUs.
+- Without a persistent `/workspace`, job data and outputs are lost on pod
+  restart. The repo, venv and engines are recreated by clone + setup.
 
 ## Diagnostics cheat-sheet for "can't use device 0"
 
