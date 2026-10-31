@@ -20,9 +20,9 @@ Vulkan build remains available as a portable fallback.
 On Windows the ONNX engine uses DirectML; on Linux with an NVIDIA GPU it uses
 CUDA (installed by `scripts/setup.sh`). The Vulkan engines cover AMD/Intel
 GPUs and run on whatever Vulkan can see, so run them natively on the OS that
-owns the GPU. In particular, do not run them inside WSL2: Ubuntu's Mesa has
-no Vulkan-on-D3D12 driver, so Vulkan there only sees the `llvmpipe` CPU
-fallback.
+owns the GPU. WSL2 works too, but Ubuntu's stock Mesa has no Vulkan-on-D3D12
+(Dozen) driver, so `vulkaninfo` only sees the `llvmpipe` CPU fallback until
+you install it — `scripts/setup_amd.sh` does that via the kisak-mesa PPA.
 
 AMD GPUs are supported on two levels: the Vulkan engines work out of the box,
 and the PyTorch RIFE path also runs on ROCm (PyTorch exposes the CUDA API on
@@ -60,6 +60,17 @@ Vulkan download decision. On AMD, install a ROCm PyTorch build (below) and the
 Vulkan engines work out of the box.
 
 ### AMD GPUs (ROCm / Vulkan)
+
+The quickest path on Ubuntu/WSL2 is:
+
+```bash
+./scripts/setup_amd.sh          # or ./setup_amd.sh from the repo root
+```
+
+It installs Mesa's Dozen driver on WSL2, runs the normal setup with the Vulkan
+engines, optionally installs the gfx1200 ROCm PyTorch wheel (`--rocm`), checks
+which engines are usable, and starts the server. `--no-start` sets up only,
+`--vulkan` never touches ROCm, and `--yes` accepts all prompts.
 
 **Vulkan (works everywhere).** `scripts/setup.sh` installs the Mesa Vulkan
 driver on non-NVIDIA Linux and downloads the ncnn Real-ESRGAN/RIFE binaries

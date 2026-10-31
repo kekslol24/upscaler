@@ -15,8 +15,10 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   creates `.venv`, installs deps, downloads RIFE v4.6 PyTorch weights, and
   downloads ncnn engines only when Vulkan sees a real GPU; CUDA images reuse the
   system PyTorch by enabling venv system site packages). Windows:
-  `scripts\setup.ps1`. On AMD Linux, install a ROCm PyTorch build yourself (the
-  script only installs Vulkan/ncnn); see README "AMD GPUs (ROCm / Vulkan)".
+  `scripts\setup.ps1`. AMD Linux/WSL2: `./scripts/setup_amd.sh` (or
+  `./setup_amd.sh`) installs Mesa Dozen on WSL2, runs `setup.sh`, optionally
+  installs the gfx1200 ROCm PyTorch wheel (`--rocm`), then starts the server;
+  `--no-start` only sets up.
 - Dev server: `.venv/bin/python -m uvicorn backend.main:app --reload`
   (Windows: `.venv\Scripts\python.exe -m uvicorn backend.main:app --reload`).
   `python launcher.py` picks a free port and opens the browser.

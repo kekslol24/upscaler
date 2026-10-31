@@ -66,9 +66,9 @@ if command -v pacman >/dev/null 2>&1; then
   fi
 elif command -v apt-get >/dev/null 2>&1; then
   # Note: on WSL2 Ubuntu's Mesa does not ship the Dozen (Vulkan-on-D3D12)
-  # driver, so Vulkan only sees the llvmpipe CPU fallback there. For GPU
-  # acceleration on a Windows machine run the project natively on Windows
-  # with scripts/setup.ps1 instead.
+  # driver, so Vulkan only sees the llvmpipe CPU fallback there. Run
+  # scripts/setup_amd.sh to install Dozen (kisak-mesa), or run the project
+  # natively on Windows with scripts/setup.ps1.
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ffmpeg unzip curl python3-venv python3-pip xvfb xauth
