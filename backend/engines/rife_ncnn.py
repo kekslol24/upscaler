@@ -28,6 +28,9 @@ BINARY_PATH = ENGINE_DIR / ("rife-ncnn-vulkan.exe" if IS_WINDOWS else "rife-ncnn
 
 
 class RifeNcnnInterpolator(FrameInterpolator):
+    #: work happens in the ncnn child process, so the cooperative pause
+    #: only parks the Python side; hide the button instead.
+    pausable = False
     def __init__(self, name: str, label: str, model_name: str, description: str = "") -> None:
         self.name = name
         self.label = label

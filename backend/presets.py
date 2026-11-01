@@ -27,7 +27,7 @@ class Preset:
         return asdict(self)
 
 
-_ANIME_VIDEO = ("realesrgan-animevideov3-onnx", "realesrgan-animevideov3")
+_ANIME_VIDEO = ("anime4k-v4", "realesrgan-animevideov3-onnx", "realesrgan-animevideov3")
 _RIFE = "rife-v4.6"
 
 PRESETS: list[Preset] = [

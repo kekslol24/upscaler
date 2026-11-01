@@ -8,7 +8,7 @@ cases. Real detect/render still needs a GPU and lives in test_stages.py.
 import pytest
 
 from backend import gpu
-from backend.engines import rife_torch
+from backend.engines import realesrgan_onnx, rife_torch
 from backend.engines.rife_torch import _cuda_state
 
 
@@ -36,7 +36,11 @@ def interp(monkeypatch, tmp_path):
     i = rife_torch.RifeTorchInterpolator("rife-v4.6", "RIFE v4.6")
     fake_weights = tmp_path / "flownet.pkl"
     fake_weights.write_bytes(b"fake")
-    monkeypatch.setattr(i, "model_path", fake_weights)
+    monkeypatch.setattr(
+        rife_torch.RifeTorchInterpolator,
+        "model_path",
+        property(lambda self: fake_weights),
+    )
     return i
 
 
@@ -70,3 +74,66 @@ def test_is_available_reflects_cuda_state(monkeypatch, interp):
     assert interp.is_available() is True
     monkeypatch.setattr(rife_torch, "_cuda_state", lambda: {"ok": False})
     assert interp.is_available() is False
+
+
+############ AMD ROCm detection ############
+
+_ROCMINFO = """\
+HSA Agents
+*******
+Agent 1
+*******
+  Name:                    AMD Ryzen 5 5600X 6-Core Processor
+  Marketing Name:          AMD Ryzen 5 5600X 6-Core Processor
+  Device Type:             CPU
+*******
+Agent 2
+*******
+  Name:                    gfx1200
+  Marketing Name:          AMD Radeon RX 9060 XT
+  Device Type:             GPU
+      Name:                    amdgcn-amd-amdhsa--gfx1200
+"""
+
+
+def test_rocm_available_uses_any_rocm_tool(monkeypatch):
+    for tool in ("rocminfo", "rocm-smi", "amd-smi"):
+        monkeypatch.setattr(
+            gpu.shutil, "which",
+            lambda name, tool=tool: f"/usr/bin/{name}" if name == tool else None,
+        )
+        assert gpu.rocm_available()
+    monkeypatch.setattr(gpu.shutil, "which", lambda name: None)
+    assert not gpu.rocm_available()
+
+
+def test_rocm_gpu_agents_skips_cpu_agents():
+    gpus = gpu._rocm_gpu_agents(_ROCMINFO)
+    assert [(g.index, g.name, g.vendor) for g in gpus] == [
+        (0, "AMD Radeon RX 9060 XT", "AMD"),
+    ]
+
+
+class _FakeOrt:
+    def __init__(self, providers):
+        self._providers = providers
+
+    def get_available_providers(self):
+        return self._providers
+
+
+@pytest.mark.parametrize("providers,expected", [
+    (["MIGraphXExecutionProvider", "CPUExecutionProvider"], "MIGraphXExecutionProvider"),
+    (["ROCMExecutionProvider", "CPUExecutionProvider"], "ROCMExecutionProvider"),
+    (["DmlExecutionProvider", "MIGraphXExecutionProvider"], "DmlExecutionProvider"),
+    (["CPUExecutionProvider"], None),
+])
+def test_onnx_prefers_amd_providers(monkeypatch, providers, expected):
+    monkeypatch.delenv(realesrgan_onnx._ALLOW_CPU_ENV, raising=False)
+    monkeypatch.setattr(
+        realesrgan_onnx, "_onnxruntime", lambda: _FakeOrt(providers),
+    )
+    engine = realesrgan_onnx.RealEsrganOnnxEngine(
+        "test", "test", "realesr-animevideov3", supported_scales=(2,),
+    )
+    assert engine._gpu_provider() == expected

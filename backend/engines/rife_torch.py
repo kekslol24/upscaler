@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import pipeline
+from .. import gpu, pipeline
 from ..paths import MODELS_DIR
 from .base import FrameInterpolator, ProgressCallback
 
@@ -57,30 +57,75 @@ def _cuda_visible_devices() -> str | None:
     raw = os.environ.get("CUDA_VISIBLE_DEVICES")
     if raw is None:
         return None
-    return raw or "(empty)"
+    return raw.strip() or "(empty)"
+
+
+def _torch_backend(torch) -> str | None:
+    """`rocm` on AMD, `cuda` on NVIDIA, `None` for a CPU-only wheel."""
+    if getattr(torch.version, "hip", None):
+        return "rocm"
+    if getattr(torch.version, "cuda", None):
+        return "cuda"
+    return None
 
 
 def _cuda_state() -> dict:
-    """Inspect the CUDA situation without raising.
+    """Inspect the CUDA/ROCm situation without raising.
+
+    ROCm PyTorch implements the `torch.cuda` API, so the checks are the
+    same on AMD; `backend` only changes the diagnostic wording.
 
     Returns one of:
       {"ok": bool, "error": str|None, "device_count": int|None,
-       "visible": str|None, "available": bool}
-    `available=False` means torch is importable but CUDA is not usable
-    (the whole reason this stack falls back to Vulkan/CPU engines).
+       "visible": str|None, "available": bool, "backend": str|None,
+       "device_name": str|None}
+    `available=False` means torch is importable but its GPU API is not
+    usable (the whole reason this stack falls back to Vulkan engines).
     """
+    base = {
+        "available": False,
+        "device_count": None,
+        "visible": _cuda_visible_devices(),
+        "backend": None,
+        "device_name": None,
+    }
     if importlib.util.find_spec("torch") is None:
-        return {"ok": False, "error": "PyTorch is not installed", "available": False, "device_count": None, "visible": _cuda_visible_devices()}
+        hint = ""
+        if gpu.rocm_available():
+            hint = (
+                " (ROCm GPU detected — install a ROCm PyTorch build with "
+                "./scripts/setup_amd.sh --rocm)"
+            )
+        return {"ok": False, "error": f"PyTorch is not installed{hint}", **base}
     try:
         import torch
     except Exception as exc:
-        return {"ok": False, "error": f"PyTorch failed to import: {exc}", "available": False, "device_count": None, "visible": _cuda_visible_devices()}
+        return {"ok": False, "error": f"PyTorch failed to import: {exc}", **base}
+    backend = _torch_backend(torch)
+    base["backend"] = backend
     if not torch.cuda.is_available():
-        return {"ok": False, "error": None, "available": False, "device_count": 0, "visible": _cuda_visible_devices()}
+        return {"ok": False, "error": None, "device_count": 0, **base}
     count = torch.cuda.device_count()
     if count == 0:
-        return {"ok": False, "error": "PyTorch reports zero CUDA devices despite CUDA being available", "available": True, "device_count": 0, "visible": _cuda_visible_devices()}
-    return {"ok": True, "error": None, "available": True, "device_count": count, "visible": _cuda_visible_devices()}
+        return {
+            "ok": False,
+            "error": "PyTorch reports zero CUDA devices despite CUDA being available",
+            **base,
+            "device_count": 0,
+        }
+    try:
+        device_name = torch.cuda.get_device_name(0)
+    except Exception:
+        device_name = None
+    return {
+        "ok": True,
+        "error": None,
+        "available": True,
+        "device_count": count,
+        "visible": base["visible"],
+        "backend": backend,
+        "device_name": device_name,
+    }
 
 
 class _AsyncFrameWriter:
@@ -180,6 +225,17 @@ class RifeTorchInterpolator(FrameInterpolator):
                 if raw not in (None, "", "-1")
                 else ""
             )
+            amd = state.get("backend") == "rocm" or (
+                state.get("backend") is None and gpu.rocm_available()
+            )
+            if amd:
+                return (
+                    "PyTorch CUDA is not available"
+                    f"{hint}; the ROCm build cannot see the AMD GPU — check "
+                    "the amdgpu/Adrenalin driver, /dev/kfd (Linux) or "
+                    "/dev/dxg (WSL2), then install PyTorch with "
+                    "./scripts/setup_amd.sh --rocm"
+                )
             return (
                 "PyTorch CUDA is not available"
                 f"{hint}; nvidia-smi may show GPUs that torch cannot see — "
@@ -333,14 +389,12 @@ class RifeTorchInterpolator(FrameInterpolator):
         from .rife_torch_model import RifeModel
 
         if not torch.cuda.is_available():
-            raise RuntimeError(
-                "PyTorch CUDA is not available"
-            )
+            raise RuntimeError("PyTorch CUDA/ROCm is not available")
         count = torch.cuda.device_count()
         if gpu_id is not None and not (0 <= gpu_id < count):
             raise RuntimeError(
-                f"no usable CUDA device with index {gpu_id}: "
-                f"torch sees {count} CUDA device(s) "
+                f"no usable GPU device with index {gpu_id}: "
+                f"torch sees {count} CUDA/ROCm device(s) "
                 f"(CUDA_VISIBLE_DEVICES={_cuda_visible_devices()!r})"
             )
         index = gpu_id if gpu_id is not None else 0

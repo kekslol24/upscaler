@@ -8,12 +8,66 @@ Also runnable from a checkout:  python launcher.py
 
 from __future__ import annotations
 
+import glob
 import logging
+import os
 import socket
 import sys
+import sysconfig
 import threading
 import webbrowser
 from pathlib import Path
+
+
+def _ensure_rocm_env() -> None:
+    """Put the ROCm runtime bundled in site-packages on the loader path.
+
+    ONNX Runtime's ROCm provider loads its dependencies with dlopen, and
+    LD_LIBRARY_PATH is read before Python runs, so a normal os.environ
+    update is too late. Re-exec once with the paths in place.
+    """
+    if sys.platform == "win32" or os.environ.get("UPSCALER_ROCM_ENV") == "1":
+        return
+    if Path("/proc/version").is_file() and "microsoft" in Path("/proc/version").read_text(errors="ignore").lower():
+        os.environ.setdefault("HSA_ENABLE_DXG_DETECTION", "1")
+    try:
+        purelib = Path(sysconfig.get_paths()["purelib"])
+    except Exception:  # noqa: BLE001
+        return
+    libs = [
+        purelib / "_rocm_sdk_core" / "lib",
+        purelib / "_rocm_sdk_libraries" / "lib",
+    ]
+    libs = [p for p in libs if p.is_dir()]
+    if not libs:
+        return
+    parts = [str(p) for p in libs]
+    for pattern in (
+        "/opt/rocm*/lib/librocm_smi64.so.7",
+        str(purelib / "torch" / "lib" / "librocm_smi64.so.7"),
+    ):
+        matches = sorted(glob.glob(pattern))
+        if not matches:
+            continue
+        shim_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "upscaler" / "rocm-libs"
+        try:
+            shim_dir.mkdir(parents=True, exist_ok=True)
+            shim = shim_dir / "librocm_smi64.so.1"
+            if shim.is_symlink() or shim.exists():
+                shim.unlink()
+            shim.symlink_to(matches[-1])
+            parts.insert(0, str(shim_dir))
+        except OSError:
+            pass
+        break
+    current = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if p]
+    if all(p in current for p in parts):
+        os.environ["UPSCALER_ROCM_ENV"] = "1"
+        return
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(parts + current)
+    os.environ["UPSCALER_ROCM_ENV"] = "1"
+    argv = getattr(sys, "orig_argv", [sys.executable, *sys.argv])[1:]
+    os.execv(sys.executable, [sys.executable, *argv])
 
 
 def _free_port(preferred: int = 8000) -> int:
@@ -53,6 +107,7 @@ def _fatal(message: str) -> None:
 
 
 def main() -> None:
+    _ensure_rocm_env()
     from backend import paths  # sets up PATH for the bundled ffmpeg
 
     paths.DATA_DIR.mkdir(parents=True, exist_ok=True)

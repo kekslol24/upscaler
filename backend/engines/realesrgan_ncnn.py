@@ -38,6 +38,9 @@ MODELS_DIR = ENGINE_DIR / "models"
 
 
 class RealEsrganNcnnEngine(UpscaleEngine):
+    #: work happens in the ncnn child process, so the cooperative pause
+    #: only parks the Python side; hide the button instead.
+    pausable = False
     def __init__(
         self,
         name: str,

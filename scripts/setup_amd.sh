@@ -76,6 +76,29 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     export HSA_ENABLE_DXG_DETECTION=1
 fi
 
+rocm_runtime_env() {
+    # AMD's pip wheels keep ROCm in site-packages. ONNX Runtime loads its
+    # provider with dlopen, so these paths must be in the environment before
+    # Python starts. Recent builds also need librocm_smi64.so.1 while the
+    # system/PyTorch ship librocm_smi64.so.7; a cache-dir symlink bridges them.
+    local lib smi
+    local shim_dir="${XDG_CACHE_HOME:-$HOME/.cache}/upscaler/rocm-libs"
+    for lib in "$ROOT_DIR"/.venv/lib/python*/site-packages/_rocm_sdk_core/lib \
+        "$ROOT_DIR"/.venv/lib/python*/site-packages/_rocm_sdk_libraries/lib; do
+        [ -d "$lib" ] && export LD_LIBRARY_PATH="$lib:${LD_LIBRARY_PATH:-}"
+    done
+    for smi in /opt/rocm*/lib/librocm_smi64.so.7 \
+        "$ROOT_DIR"/.venv/lib/python*/site-packages/torch/lib/librocm_smi64.so.7; do
+        [ -e "$smi" ] || continue
+        mkdir -p "$shim_dir"
+        ln -sf "$smi" "$shim_dir/librocm_smi64.so.1"
+        export LD_LIBRARY_PATH="$shim_dir:${LD_LIBRARY_PATH:-}"
+        break
+    done
+}
+
+rocm_runtime_env
+
 confirm() {
     if [ "$ASSUME_YES" -eq 1 ]; then
         return 0
@@ -153,6 +176,14 @@ PY
 rocm_ready() {
     if $IS_WSL; then
         [ -e /dev/dxg ] || return 1
+        # Current ROCm talks to the WSL GPU paravirt device directly, but
+        # only enumerates it with DXG detection enabled. Older setups also
+        # need ROCDXG; accept either.
+        if command -v rocminfo >/dev/null 2>&1 \
+            && HSA_ENABLE_DXG_DETECTION=1 rocminfo 2>/dev/null \
+                | grep -qE 'Device Type:[[:space:]]+GPU'; then
+            return 0
+        fi
         if ldconfig -p 2>/dev/null | grep -qi librocdxg; then
             return 0
         fi
@@ -221,6 +252,85 @@ ensure_rocm() {
     return 1
 }
 
+torch_hip_major() {
+    [ -x .venv/bin/python ] || return 1
+    .venv/bin/python - <<'PY' 2>/dev/null || true
+import torch
+hip = getattr(torch.version, "hip", None) or ""
+print(hip.split(".")[0] if hip else "")
+PY
+}
+
+ort_gpu_ok() {
+    [ -x .venv/bin/python ] || return 1
+    .venv/bin/python - <<'PY' >/dev/null 2>&1
+import onnxruntime as ort
+gpu = {"MIGraphXExecutionProvider", "ROCMExecutionProvider"}
+raise SystemExit(0 if gpu.intersection(ort.get_available_providers()) else 1)
+PY
+}
+
+ensure_ort() {
+    if ! rocm_ready; then
+        echo "== ROCm not available; skipping ONNX Runtime ROCm provider =="
+        return 0
+    fi
+    # The torch install above may have added site-packages/ROCm since the
+    # top-level call, so refresh the loader path before running Python.
+    rocm_runtime_env
+
+    # ORT's AMD Linux wheels must match the HIP runtime. The gfx1200 PyTorch
+    # wheel ships ROCm 10.1 (libamdhip64.so.7), so use the ROCm 7 build;
+    # native ROCm 6 installs need the older post1 wheel (libamdhip64.so.6).
+    local major spec
+    major="$(torch_hip_major)"
+    if [ -z "$major" ] && [ -r /opt/rocm/.info/version ]; then
+        major="$(cut -d. -f1 /opt/rocm/.info/version)"
+    fi
+    case "$major" in
+        ''|*[!0-9]*) major=0 ;;
+    esac
+    if [ "$major" -ge 7 ]; then
+        spec="onnxruntime-rocm==1.22.2.post3"
+    else
+        spec="onnxruntime-rocm==1.22.2.post1"
+    fi
+
+    if ort_gpu_ok && .venv/bin/python -m pip show onnxruntime-rocm 2>/dev/null \
+        | grep -q "^Version: ${spec##*==}$"; then
+        echo "== ONNX Runtime ROCm provider already available =="
+        return 0
+    fi
+
+    echo "== ONNX Runtime AMD provider ($spec) =="
+    # CPU onnxruntime and onnxruntime-gpu shadow the ROCm module at import.
+    for pkg in onnxruntime onnxruntime-gpu onnxruntime-rocm \
+        onnxruntime-migraphx onnxruntime-ep-migraphx; do
+        .venv/bin/python -m pip uninstall -y "$pkg" >/dev/null 2>&1 || true
+    done
+    .venv/bin/python -m pip install "$spec" || {
+        echo "warning: could not install $spec; the ONNX upscaler will be" >&2
+        echo "         unavailable and the Vulkan upscaler remains usable." >&2
+        return 1
+    }
+    .venv/bin/python - <<'PY' || true
+import onnxruntime as ort
+from pathlib import Path
+providers = [p for p in ("MIGraphXExecutionProvider", "ROCMExecutionProvider")
+             if p in ort.get_available_providers()]
+if not providers:
+    raise SystemExit(1)
+model = Path("models/realesr-animevideov3-x2.onnx")
+if model.exists():
+    opts = ort.SessionOptions()
+    opts.log_severity_level = 3
+    sess = ort.InferenceSession(str(model), opts, providers=providers)
+    print("  onnxruntime", ort.__version__, sess.get_providers())
+else:
+    print("  onnxruntime", ort.__version__, providers)
+PY
+}
+
 # -- detect the machine ------------------------------------------------------
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     echo "NVIDIA GPU detected — this script is for AMD."
@@ -264,6 +374,11 @@ fi
 echo
 echo "== ROCm / PyTorch =="
 ensure_rocm || true
+
+# -- ONNX Runtime for AMD ----------------------------------------------------
+echo
+echo "== ONNX Runtime =="
+ensure_ort || true
 
 # -- report what is usable ---------------------------------------------------
 echo

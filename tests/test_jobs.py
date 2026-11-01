@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from backend import pipeline
-from backend.engines import realesrgan_onnx as engine_mod
+from backend.engines import INTERPOLATORS, REGISTRY, realesrgan_onnx as engine_mod
 
 pytestmark = pytest.mark.skipif(not pipeline.ffmpeg_available(), reason="ffmpeg not installed")
 
@@ -20,7 +20,13 @@ def cpu_engine(monkeypatch):
     pytest.importorskip("onnxruntime")
     if not (engine_mod.MODELS_DIR / "realesr-animevideov3-x2.onnx").is_file():
         pytest.skip("ONNX models not exported")
-    monkeypatch.setenv(engine_mod._ALLOW_CPU_ENV, "1")
+    # These tests are deliberately CPU-only; on a machine with a GPU
+    # provider the env var alone would still select the GPU.
+    monkeypatch.setattr(
+        engine_mod.RealEsrganOnnxEngine,
+        "_gpu_provider",
+        lambda self: "CPUExecutionProvider",
+    )
 
 
 @pytest.fixture
@@ -184,6 +190,7 @@ def test_api_end_to_end(tiny_video, cpu_engine, tmp_path, monkeypatch):
     client = TestClient(main_mod.app)
 
     assert any(e["name"] == "libx264" for e in client.get("/api/encoders").json())
+    assert client.get("/api/capabilities").json()["pause_resume"] is True
     presets = client.get("/api/presets").json()
     assert presets and presets[0]["engines"]
 
@@ -206,3 +213,122 @@ def test_api_end_to_end(tiny_video, cpu_engine, tmp_path, monkeypatch):
     assert res.status_code == 200
     assert "tiny_x2_preview.mp4" in res.headers["content-disposition"]
     assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
+
+
+def test_pause_and_resume_running_job(manager, tiny_video, cpu_engine, monkeypatch):
+    real_infer = engine_mod._infer_frame
+
+    def slow_infer(*args, **kwargs):
+        time.sleep(0.35)
+        return real_infer(*args, **kwargs)
+
+    monkeypatch.setattr(engine_mod, "_infer_frame", slow_infer)
+    job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
+    manager.start(job.id, ENGINE, 2, options={"encode": {"encoder": "libx264"}})
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        job = manager.get(job.id)
+        if job.status == "running" and job.progress > 0:
+            break
+        time.sleep(0.05)
+    assert job.status == "running" and job.progress > 0
+
+    manager.pause(job.id)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        job = manager.get(job.id)
+        if job.status == "paused" and job.message.startswith("paused ·"):
+            break
+        time.sleep(0.05)
+    assert job.status == "paused" and job.message.startswith("paused ·")
+    paused_progress = job.progress
+    time.sleep(1.0)
+    job = manager.get(job.id)
+    assert job.status == "paused" and job.progress == paused_progress
+
+    manager.resume(job.id)
+    job = _wait(manager, job.id, timeout=60)
+    assert job.status == "done", job.message
+    assert job.progress == 100
+
+
+def test_api_pause_and_resume(tiny_video, cpu_engine, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import backend.jobs as jobs_mod
+    from backend.jobs import JobManager
+
+    real_infer = engine_mod._infer_frame
+
+    def slow_infer(*args, **kwargs):
+        time.sleep(0.35)
+        return real_infer(*args, **kwargs)
+
+    monkeypatch.setattr(engine_mod, "_infer_frame", slow_infer)
+    monkeypatch.setattr(jobs_mod, "manager", JobManager(data_dir=tmp_path / "jobs"))
+    import backend.main as main_mod
+    monkeypatch.setattr(main_mod, "manager", jobs_mod.manager)
+    client = TestClient(main_mod.app)
+
+    res = client.post("/api/upload", files={"file": ("tiny.mkv", tiny_video.read_bytes())})
+    job_id = res.json()["id"]
+    res = client.post(f"/api/jobs/{job_id}/start", json={
+        "engine": ENGINE, "scale": 2,
+        "options": {"encode": {"encoder": "libx264"}},
+    })
+    assert res.status_code == 200, res.text
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        body = client.get(f"/api/jobs/{job_id}").json()
+        if body["status"] == "running" and body["progress"] > 0:
+            break
+        time.sleep(0.05)
+    assert body["status"] == "running"
+
+    res = client.post(f"/api/jobs/{job_id}/pause")
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "paused"
+    res = client.post(f"/api/jobs/{job_id}/resume")
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "running"
+
+    job = _wait(jobs_mod.manager, job_id, timeout=60)
+    assert job.status == "done", job.message
+
+
+@pytest.mark.skipif(
+    not REGISTRY["anime4k-v4"].is_available(),
+    reason="Anime4K/libplacebo not available",
+)
+def test_anime4k_job_end_to_end(manager, tiny_video):
+    job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
+    manager.start(job.id, "anime4k-v4", 2, options={
+        "encode": {"encoder": "libx264"},
+    })
+    assert manager.get(job.id).pausable is False
+    with pytest.raises(RuntimeError, match="cannot pause"):
+        manager.pause(job.id)
+    job = _wait(manager, job.id)
+    assert job.status == "done", job.message
+    info = pipeline.probe(job.output_path)
+    assert (info.width, info.height) == (128, 96)
+    assert info.frame_rate == "12/1" and info.has_audio
+
+
+@pytest.mark.skipif(
+    not REGISTRY["anime4k-v4"].is_available()
+    or not INTERPOLATORS["rife-v4.6"].is_available(),
+    reason="Anime4K and/or RIFE PyTorch not available",
+)
+def test_anime4k_after_rife_job(manager, tiny_video):
+    job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
+    manager.start(job.id, "anime4k-v4", 2, options={
+        "interpolate": {"engine": "rife-v4.6", "factor": 2, "mode": "smooth"},
+        "encode": {"encoder": "libx264"},
+    })
+    job = _wait(manager, job.id)
+    assert job.status == "done", job.message
+    info = pipeline.probe(job.output_path)
+    assert (info.width, info.height) == (128, 96)
+    assert info.frame_rate == "24/1" and info.has_audio

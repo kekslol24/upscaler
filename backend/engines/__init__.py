@@ -7,6 +7,7 @@ registry below.
 
 from __future__ import annotations
 
+from .anime4k import Anime4KEngine
 from .base import FrameInterpolator, UpscaleEngine
 from .realesrgan_ncnn import RealEsrganNcnnEngine
 from .realesrgan_onnx import RealEsrganOnnxEngine
@@ -20,9 +21,15 @@ NO_UPSCALE = "none"
 REGISTRY: dict[str, UpscaleEngine] = {
     engine.name: engine
     for engine in [
+        Anime4KEngine(
+            name="anime4k-v4",
+            label="Anime4K v4 — fast shader upscaler (Vulkan)",
+            description="GPU GLSL shader chain (Restore + Upscale CNN) that sharpens line art at a fraction of the cost of the neural upscalers. Best for long anime batches; it enhances lines rather than inventing fine detail.",
+            supported_scales=(2, 3, 4),
+        ),
         RealEsrganOnnxEngine(
             name="realesrgan-animevideov3-onnx",
-            label="Real-ESRGAN — anime video (fast, DirectML/CUDA)",
+            label="Real-ESRGAN — anime video (fast, DirectML/CUDA/ROCm)",
             model_prefix="realesr-animevideov3",
             description="Same model and output as the Vulkan engine, several times faster: whole-frame GPU inference, streamed straight between decoder and encoder.",
             supported_scales=(2, 3, 4),

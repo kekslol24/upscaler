@@ -175,8 +175,9 @@ import onnxruntime as ort
 print("onnxruntime", ort.__version__)
 PY
 else
-  echo "no NVIDIA GPU found — the ONNX engine will use the CPU provider"
-  echo "(set UPSCALER_ALLOW_CPU=1 to allow it, useful only for tests)."
+  echo "no NVIDIA GPU found — the ONNX engine needs onnxruntime-directml"
+  echo "(Windows) or an AMD ROCm build (onnxruntime-rocm)."
+  echo "Run scripts/setup_amd.sh to install the matching AMD provider."
 fi
 
 vulkan_summary() {

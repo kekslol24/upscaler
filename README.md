@@ -3,12 +3,15 @@
 Local video upscaler with a pluggable model "harness". Upload a short clip,
 pick an engine, get a before/after slider.
 
-Two engines run the same Real-ESRGAN anime-video model:
+Three upscaling paths are available:
 
-- **DirectML/CUDA (default)**: ONNX Runtime, whole-frame inference,
-  frames streamed straight between ffmpeg decoder and encoder. Several
-  times faster than the Vulkan build and needs no scratch disk space.
-  Output is identical to within one 8-bit level.
+- **Anime4K v4 (default)**: GPU GLSL shader chain via ffmpeg/libplacebo.
+  Much cheaper than the neural models; it sharpens and restores line art
+  rather than inventing detail. The preset picks it automatically.
+- **DirectML/CUDA**: ONNX Runtime, whole-frame inference, frames streamed
+  straight between ffmpeg decoder and encoder. Several times faster than
+  the Vulkan build and needs no scratch disk space. Output is identical
+  to within one 8-bit level.
 - **Vulkan (ncnn)**: the portable prebuilt binary; works on Linux too.
 
 Frame interpolation has the same choice: the PyTorch RIFE engine (CUDA on
@@ -24,9 +27,13 @@ owns the GPU. WSL2 works too, but Ubuntu's stock Mesa has no Vulkan-on-D3D12
 (Dozen) driver, so `vulkaninfo` only sees the `llvmpipe` CPU fallback until
 you install it — `scripts/setup_amd.sh` does that via the kisak-mesa PPA.
 
-AMD GPUs are supported on two levels: the Vulkan engines work out of the box,
-and the PyTorch RIFE path also runs on ROCm (PyTorch exposes the CUDA API on
-ROCm, so the same engine works). See [AMD GPUs](#amd-gpus-rocm--vulkan).
+AMD GPUs are supported on three levels: the Vulkan engines work out of the
+box, the PyTorch RIFE path also runs on ROCm (PyTorch exposes the CUDA API on
+ROCm, so the same engine works), and the Anime4K shader engine uses Vulkan.
+On WSL2 the Anime4K engine prefers a Windows `ffmpeg.exe` with libplacebo
+(found via `where ffmpeg`) because Mesa's Dozen Vulkan path is much slower;
+on native Linux/Windows it uses the normal ffmpeg. See
+[AMD GPUs](#amd-gpus-rocm--vulkan).
 
 ### Windows
 
@@ -112,11 +119,15 @@ Notes for the RX 9060 XT (gfx1200, RDNA 4):
 - Expect it to be much slower than an RTX 4090: roughly 1/8 the FP32 compute
   and 1/3 the memory bandwidth. 4K RIFE is likely below real-time; 1080p is
   comfortable. Benchmark on the actual card with `scripts/bench.py`.
-- The ONNX upscaler on Linux AMD is the remaining gap: ONNX Runtime removed
-  `ROCMExecutionProvider` in 1.23 and now uses the MIGraphX plugin
-  (`onnxruntime-ep-migraphx`), which this app does not register yet. Use the
-  Vulkan upscaler there, or add MIGraphX support. On Windows, DirectML already
-  covers AMD for the ONNX engine.
+- The ONNX upscaler works on Linux AMD too. `setup_amd.sh` installs
+  `onnxruntime-rocm==1.22.2.post3` against the gfx1200 ROCm 10.1 PyTorch stack
+  (`post1` for native ROCm 6 installs), and the engine selects
+  `ROCMExecutionProvider`. `MIGraphXExecutionProvider` is also accepted when a
+  newer ORT build provides it. Start the server with `./scripts/run.sh` (or
+  `python launcher.py`) so the ROCm libraries bundled in site-packages and the
+  `librocm_smi64.so.1` shim are on the loader path; a bare
+  `uvicorn backend.main:app` will report the ONNX engine as unavailable.
+  On Windows, DirectML already covers AMD for the ONNX engine.
 - Hardware encoding: Windows AMD can use AMF (`h264_amf`/`hevc_amf`) if the
   ffmpeg build supports it; Linux AMD has no VAAPI candidate in the encoder
   list, so it falls back to libx264. The GPU YUV conversion and background
@@ -217,10 +228,15 @@ Open http://127.0.0.1:8000. Picking a file uploads it immediately; then:
    and compare settings in seconds,
 3. hit **Render full video** once you like the result.
 
-Full 4K renders on integrated graphics are slow — that's expected; a
-running render can be cancelled. Finished jobs stay listed in **Recent
-jobs** across server restarts (job state lives in `data/jobs/jobs.sqlite3`)
-and can be re-used as a source or viewed again.
+Full 4K renders on integrated graphics are slow — that's expected. A
+running render can be **paused** and **resumed** between frames, or cancelled;
+pausing parks the worker without closing the encoder, so it keeps its current
+progress. Engines that run as one external process (Anime4K, the ncnn/Vulkan
+engines) show no Pause button; cancel those instead. A paused render does not
+survive a server restart (the restart marks it interrupted), so resume it
+before restarting the server. Finished jobs stay listed in **Recent jobs**
+across server restarts (job state lives in `data/jobs/jobs.sqlite3`) and can
+be re-used as a source or viewed again.
 
 ### Parallel renders (one episode per GPU)
 
@@ -323,6 +339,7 @@ interpolator sees every frame pair.
 
 | Engine | Runs on | Good for |
 |---|---|---|
+| Anime4K v4 | ffmpeg/libplacebo, streaming | fastest anime line enhancer; on WSL uses the Windows ffmpeg when available |
 | Real-ESRGAN anime video (DirectML/CUDA) | ONNX Runtime, streaming | anime, fastest on NVIDIA/Windows AMD |
 | Real-ESRGAN anime video (Vulkan) | ncnn binary | anime, any GPU/OS |
 | Real-ESRGAN anime, max detail | ncnn binary | anime stills model, crispest lines |

@@ -3,9 +3,8 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 numpy>=1.26
 # GPU inference for the ONNX engine (Windows: any DX12 GPU via DirectML).
-# On Linux, scripts/setup.sh installs onnxruntime-gpu automatically when
-# an NVIDIA GPU is present. AMD Linux: ORT >= 1.23 removed
-# ROCMExecutionProvider; AMD ships the MIGraphX plugin
-# (onnxruntime-ep-migraphx) instead, which the app does not register yet —
-# use the Vulkan upscaler there.
+# On Linux, scripts/setup.sh installs onnxruntime-gpu when an NVIDIA GPU is
+# present, and scripts/setup_amd.sh installs the AMD build: onnxruntime-rocm
+# (ROCMExecutionProvider) matching the installed ROCm/HIP runtime. The engine
+# also accepts MIGraphXExecutionProvider when the ORT build provides it.
 onnxruntime-directml>=1.20; sys_platform == "win32"

@@ -10,8 +10,10 @@ between, so decode, upscale and encode overlap and a job never needs
 tens of GB of intermediate PNGs.
 
 Runtime: onnxruntime-directml on Windows (any DX12 GPU: AMD, NVIDIA,
-Intel). On Linux the same models work with onnxruntime-gpu (CUDA/ROCm)
-if installed. The CPU provider is refused as far too slow.
+Intel). On Linux the same models work with onnxruntime-gpu (CUDA) or an
+AMD ROCm build: onnxruntime-rocm (ROCMExecutionProvider) or any ORT build
+that provides MIGraphXExecutionProvider. The CPU provider is refused as far
+too slow.
 
 gpu_id is passed through as the provider's device_id. DirectML numbers
 adapters in DXGI order, which on a single-GPU machine is 0 like Vulkan;
@@ -30,7 +32,16 @@ from .. import pipeline
 from ..paths import MODELS_DIR
 from ..pipeline import RenderOptions, VideoInfo
 from .base import JobCancelled, ProgressCallback, UpscaleEngine
-_GPU_PROVIDERS = ("DmlExecutionProvider", "CUDAExecutionProvider", "ROCMExecutionProvider")
+# Priority order: DirectML covers every DX12 GPU on Windows, CUDA is the
+# NVIDIA Linux path, MIGraphX is the current AMD Linux path (ORT >= 1.23)
+# and ROCMExecutionProvider is the older AMD Linux path still shipped by
+# onnxruntime-rocm builds.
+_GPU_PROVIDERS = (
+    "DmlExecutionProvider",
+    "CUDAExecutionProvider",
+    "MIGraphXExecutionProvider",
+    "ROCMExecutionProvider",
+)
 #: set UPSCALER_ALLOW_CPU=1 to run on the CPU provider (tests, GPU-less
 #: machines) — roughly 20 s per 1080p frame, so refused by default
 _ALLOW_CPU_ENV = "UPSCALER_ALLOW_CPU"
@@ -131,8 +142,9 @@ class RealEsrganOnnxEngine(UpscaleEngine):
             return "onnxruntime not installed — pip install -r requirements.txt"
         if self._gpu_provider() is None:
             return ("onnxruntime has no GPU provider — needs onnxruntime-directml "
-                    f"(Windows) or onnxruntime-gpu (Linux); set {_ALLOW_CPU_ENV}=1 "
-                    "to run (very slowly) on the CPU")
+                    "(Windows), onnxruntime-gpu (NVIDIA Linux), or "
+                    "onnxruntime-rocm / MIGraphX (AMD Linux); set "
+                    f"{_ALLOW_CPU_ENV}=1 to run (very slowly) on the CPU")
         for scale in self.supported_scales:
             if not self._model_path(scale).is_file():
                 return f"model file missing: {self._model_path(scale)}"
@@ -157,8 +169,9 @@ class RealEsrganOnnxEngine(UpscaleEngine):
                     raise RuntimeError(
                         f"{name} failed to load for the x{scale} model; ONNX Runtime "
                         f"fell back to {active[0] if active else 'no provider'}. "
-                        "Install an onnxruntime-gpu build matching this machine's "
-                        "CUDA/cuDNN (scripts/setup.sh does this), or set "
+                        "Install an onnxruntime build matching this machine's "
+                        "CUDA/cuDNN (scripts/setup.sh) or ROCm/MIGraphX "
+                        "(scripts/setup_amd.sh), or set "
                         f"{_ALLOW_CPU_ENV}=1 to run on the CPU."
                     )
                 self._sessions[key] = session

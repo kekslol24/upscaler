@@ -1,11 +1,18 @@
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# Importing backend.jobs creates the module-level JobManager. Keep that
+# instance away from a live server's data directory (it would mark the
+# server's running jobs as interrupted).
+os.environ.setdefault("UPSCALER_DATA_DIR", tempfile.mkdtemp(prefix="upscaler-pytest-"))
 
 
 @pytest.fixture(scope="session")

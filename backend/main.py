@@ -43,6 +43,7 @@ def list_gpus():
         cuda_n = None
     return {
         "detectable": gpu.detection_available(),
+        "rocm": gpu.rocm_available(),
         "cuda_visible_devices": gpu.cuda_visible_devices(),
         "torch_cuda_device_count": cuda_n,
         "gpus": [
@@ -50,6 +51,12 @@ def list_gpus():
             for g in known
         ],
     }
+
+
+@app.get("/api/capabilities")
+def capabilities():
+    """Feature flags the frontend can use without guessing from a 404."""
+    return {"pause_resume": True}
 
 
 @app.get("/api/engines")
@@ -157,6 +164,28 @@ def start_job(job_id: str, body: StartJobRequest):
         raise HTTPException(404, "job not found")
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
+    return job.to_public_dict()
+
+
+@app.post("/api/jobs/{job_id}/pause")
+def pause_job(job_id: str):
+    try:
+        job = manager.pause(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    return job.to_public_dict()
+
+
+@app.post("/api/jobs/{job_id}/resume")
+def resume_job(job_id: str):
+    try:
+        job = manager.resume(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
     return job.to_public_dict()
 
 

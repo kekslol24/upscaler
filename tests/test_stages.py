@@ -10,7 +10,7 @@ import time
 import pytest
 
 from backend import pipeline
-from backend.engines import INTERPOLATORS, NO_UPSCALE
+from backend.engines import INTERPOLATORS, NO_UPSCALE, REGISTRY
 from backend.engines import realesrgan_onnx as engine_mod
 from backend.engines import rife_ncnn
 from backend.engines.base import FrameInterpolator
@@ -60,7 +60,13 @@ def cpu_engine(monkeypatch):
     pytest.importorskip("onnxruntime")
     if not (engine_mod.MODELS_DIR / "realesr-animevideov3-x2.onnx").is_file():
         pytest.skip("ONNX models not exported")
-    monkeypatch.setenv(engine_mod._ALLOW_CPU_ENV, "1")
+    # These tests are deliberately CPU-only; on a machine with a GPU
+    # provider the env var alone would still select the GPU.
+    monkeypatch.setattr(
+        engine_mod.RealEsrganOnnxEngine,
+        "_gpu_provider",
+        lambda self: "CPUExecutionProvider",
+    )
 
 
 @pytest.fixture
@@ -229,3 +235,47 @@ def test_real_rife_directory_mode_contract(tmp_path, tiny_video):
         frames, out, 5, lambda d, t: progress.append((d, t)))
     assert len(sorted(out.glob("*.png"))) == 5
     assert progress[-1] == (5, 5)
+
+
+@pytest.mark.skipif(
+    not REGISTRY["anime4k-v4"].is_available(),
+    reason="Anime4K/libplacebo not available",
+)
+def test_real_anime4k_streaming_contract(tmp_path, tiny_video):
+    info = pipeline.probe(tiny_video)
+    out = tmp_path / "anime4k.mp4"
+    progress = []
+    REGISTRY["anime4k-v4"].upscale_video(
+        tiny_video, out, info, 2,
+        lambda d, t: progress.append((d, t)),
+        options=pipeline.RenderOptions(
+            encode=pipeline.EncodeSettings(encoder="libx264"),
+        ),
+    )
+    assert progress[-1] == (info.estimated_frames, info.estimated_frames)
+    out_info = pipeline.probe(out)
+    assert (out_info.width, out_info.height) == (128, 96)
+    assert out_info.frame_rate == "12/1" and out_info.has_audio
+    assert _video_packets(out) == info.estimated_frames
+
+
+@pytest.mark.skipif(
+    not REGISTRY["anime4k-v4"].is_available(),
+    reason="Anime4K/libplacebo not available",
+)
+def test_real_anime4k_frames_to_video(tmp_path, tiny_video):
+    frames = tmp_path / "in"
+    pipeline.extract_frames(
+        tiny_video, frames,
+        pipeline.RenderOptions(clip=pipeline.Clip(0, 0.25)),
+    )
+    out = tmp_path / "chunk.mp4"
+    REGISTRY["anime4k-v4"].upscale_frames_to_video(
+        frames, out, "12", 2, lambda d, t: None,
+        options=pipeline.RenderOptions(
+            encode=pipeline.EncodeSettings(encoder="libx264"),
+        ),
+    )
+    info = pipeline.probe(out)
+    assert (info.width, info.height) == (128, 96)
+    assert _video_packets(out) == 3

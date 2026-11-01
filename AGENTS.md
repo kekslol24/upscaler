@@ -63,6 +63,12 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
 - `backend/jobs.py` runs one worker thread per detected GPU (one render per
   GPU at a time; `UPSCALER_WORKERS=N` caps the count) and persists jobs in
   SQLite. `manager` is created at import time.
+- Renders can be paused/resumed: `POST /api/jobs/{id}/pause|resume`, with
+  Pause/Resume buttons in the progress panel and Recent jobs. Pausing is
+  cooperative (`_Progress` blocks on `resume_event` after the in-flight
+  frame), so streaming renders keep the encoder open and resume mid-stream.
+  Paused jobs are marked interrupted by a server restart (they cannot resume
+  from memory after a restart).
 - `backend/pipeline.py` builds all ffmpeg/ffprobe commands and render options.
   Keep frame rates as exact rational strings (e.g. `24000/1001`) and use
   `scale_frame_rate()` when interpolating.
@@ -83,6 +89,13 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   `backend/engines/__init__.py`; registry order sets the UI default. Presets in
   `backend/presets.py` only bundle engine preferences, scale, filters and encode
   settings.
+- `anime4k-v4` is the first/default upscaler: ffmpeg's `libplacebo` filter
+  with the Anime4K v4 Mode A HQ GLSL chain, streamed in one decode -> shader ->
+  encode pass. Shaders live in `models/anime4k/shaders/` and are concatenated
+  to a content-addressed `.hook` in the data dir. On WSL it calls a Windows
+  `ffmpeg.exe` with libplacebo (via `cmd.exe /c where ffmpeg` + `wslpath`)
+  because Dozen is much slower; that also enables AMF for `encoder: auto`.
+  Without a Windows ffmpeg it falls back to the Linux ffmpeg.
 - Output container: `encode.format` is `"mp4"` (default) or `"mkv"`. The
   in-app player always uses the MP4; `job.download_path` picks the chosen
   container and the other one becomes the secondary link. When the source has
@@ -114,11 +127,15 @@ deployment details. See `PROGRESS.md` for the current hand-off state and the
   to MIOpen autotuning.
 - `requirements-dev.txt` pulls CPU `onnxruntime` on Linux, which can shadow an
   existing `onnxruntime-gpu` (RunPod/CUDA). In GPU venvs install only `pytest` and
-  `httpx` for the tests. On AMD Linux, ONNX Runtime 1.23+ removed
-  `ROCMExecutionProvider`; the current AMD path is the MIGraphX plugin
-  (`onnxruntime-ep-migraphx`), which `_GPU_PROVIDERS` does not register yet, so
-  the ONNX upscaler is unavailable there (use the Vulkan upscaler). On Windows
-  AMD, `onnxruntime-directml` works normally.
+  `httpx` for the tests. On AMD Linux, `setup_amd.sh` installs
+  `onnxruntime-rocm==1.22.2.post3` for the gfx1200 ROCm 10.1 PyTorch stack
+  (`post1` for native ROCm 6), and `_GPU_PROVIDERS` also accepts
+  `MIGraphXExecutionProvider` when the ORT build provides it. Do not mix the
+  post1 ROCm 6 build with the ROCm 10.1 torch wheel: both providers in one
+  process segfault. The ONNX provider needs the site-packages ROCm libs and a
+  `librocm_smi64.so.1` alias on `LD_LIBRARY_PATH`; `scripts/run.sh` and
+  `launcher.py` set that up, while a bare `uvicorn backend.main:app` does not.
+  On Windows AMD, `onnxruntime-directml` works normally.
 - Headless NVIDIA containers need an X display for the Vulkan ICD: `setup.sh`
   probes `vulkaninfo` through `xvfb-run`, and `run.sh` starts Xvfb when `DISPLAY`
   is unset. The Vulkan engines/RIFE rely on this; the CUDA/ROCm RIFE path does

@@ -9,10 +9,14 @@ Two sources are consulted:
   order (honouring CUDA_VISIBLE_DEVICES), which is what `device_id`
   expects. This is also the only detection available on headless Linux
   containers (RunPod and friends), where there is no Vulkan driver.
+- `rocminfo`: AMD's ROCm user-space tools. ROCm PyTorch exposes the same
+  `torch.cuda` API, so its device index is what the RIFE/ONNX AMD paths
+  expect. This covers native Linux and WSL2 installs where Vulkan is not
+  installed or only exposes a CPU/llvmpipe device.
 
 A real Vulkan GPU wins when there is one, because that list is already
-what the Vulkan engines use. Otherwise the NVIDIA list is used, so the
-ONNX/CUDA engine can be selected on machines without Vulkan.
+what the Vulkan engines use. Otherwise NVIDIA is used, then AMD/ROCm, so
+the CUDA/ROCm engines can be selected on machines without Vulkan.
 """
 
 from __future__ import annotations
@@ -33,6 +37,10 @@ _VENDOR_IDS = {
 
 _GPU_HEADER_RE = re.compile(r"^GPU(\d+):")
 _FIELD_RE = re.compile(r"^\s*(\w+)\s*=\s*(.+)$")
+_AGENT_RE = re.compile(r"^Agent\s+\d+\s*$")
+# rocminfo's top-level agent fields are indented by exactly two spaces;
+# nested ISA/cache fields are indented further and must not be picked up.
+_ROCM_FIELD_RE = re.compile(r"^  ([A-Za-z][\w ]*?):\s+(.+?)\s*$")
 
 
 @dataclass
@@ -63,14 +71,35 @@ def _nvidia_smi_binary() -> str | None:
     return shutil.which("nvidia-smi")
 
 
+def _rocminfo_binary() -> str | None:
+    return shutil.which("rocminfo")
+
+
+def rocm_available() -> bool:
+    """True if AMD's ROCm user-space tools are installed.
+
+    This does not mean a usable GPU is present — for that see `list_gpus()`.
+    The RIFE diagnostics use it to tell an AMD machine with a missing
+    PyTorch/ROCm build from an NVIDIA machine with a missing CUDA driver.
+    """
+    return any(
+        shutil.which(name) is not None
+        for name in ("rocminfo", "rocm-smi", "amd-smi")
+    )
+
+
 def vulkaninfo_available() -> bool:
     return _vulkaninfo_binary() is not None
 
 
 def detection_available() -> bool:
-    """True if either backend tool is installed, so the picker can be
+    """True if any backend tool is installed, so the picker can be
     populated. An empty list with detection on means "no GPU found"."""
-    return vulkaninfo_available() or _nvidia_smi_binary() is not None
+    return (
+        vulkaninfo_available()
+        or _nvidia_smi_binary() is not None
+        or rocm_available()
+    )
 
 
 def cuda_visible_devices() -> str | None:
@@ -79,7 +108,7 @@ def cuda_visible_devices() -> str | None:
     raw = os.environ.get("CUDA_VISIBLE_DEVICES")
     if raw is None:
         return None
-    return raw or "(empty)"
+    return raw.strip() or "(empty)"
 
 
 def _list_vulkan_gpus() -> list[GpuInfo]:
@@ -181,6 +210,59 @@ def _list_nvidia_gpus() -> list[GpuInfo]:
     ]
 
 
+def _rocm_gpu_agents(out: str) -> list[GpuInfo]:
+    """Parse the GPU agents out of `rocminfo` output."""
+    gpus: list[GpuInfo] = []
+    name = marketing = device_type = None
+
+    def flush() -> None:
+        nonlocal name, marketing, device_type
+        if device_type == "GPU" and (marketing or name):
+            gpus.append(GpuInfo(
+                index=len(gpus),
+                name=marketing or name,
+                vendor="AMD",
+                # rocminfo does not distinguish discrete/integrated.
+                device_type="DISCRETE_GPU",
+            ))
+        name = marketing = device_type = None
+
+    for line in out.splitlines():
+        if _AGENT_RE.match(line.strip()):
+            flush()
+            continue
+        field = _ROCM_FIELD_RE.match(line)
+        if field is None:
+            continue
+        key, value = field.group(1), field.group(2)
+        if key == "Name":
+            name = value
+        elif key == "Marketing Name":
+            marketing = value
+        elif key == "Device Type":
+            device_type = value
+    flush()
+    return gpus
+
+
+def _list_rocm_gpus() -> list[GpuInfo]:
+    binary = _rocminfo_binary()
+    if binary is None:
+        return []
+    env = dict(os.environ)
+    # WSL2 exposes the GPU through /dev/dxg; ROCm only enumerates it with
+    # DXG detection switched on (the ROCm torch wheels set this too).
+    env.setdefault("HSA_ENABLE_DXG_DETECTION", "1")
+    try:
+        out = proc.run(
+            [binary],
+            capture_output=True, text=True, timeout=15, check=True, env=env,
+        ).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+    return _rocm_gpu_agents(out)
+
+
 def list_gpus() -> list[GpuInfo]:
     vulkan = _list_vulkan_gpus()
     hardware = [g for g in vulkan if g.device_type in ("DISCRETE_GPU", "INTEGRATED_GPU")]
@@ -192,6 +274,10 @@ def list_gpus() -> list[GpuInfo]:
     nvidia = _list_nvidia_gpus()
     if nvidia:
         return nvidia
+
+    rocm = _list_rocm_gpus()
+    if rocm:
+        return rocm
 
     # No hardware backend: expose whatever Vulkan reported (possibly the
     # llvmpipe CPU device) rather than inventing a GPU that isn't there.

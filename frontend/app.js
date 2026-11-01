@@ -30,6 +30,7 @@ const progressSection = $("progressSection");
 const progressMessage = $("progressMessage");
 const progressFill = $("progressFill");
 const cancelBtn = $("cancelBtn");
+const pauseBtn = $("pauseBtn");
 
 const errorSection = $("errorSection");
 const errorMessage = $("errorMessage");
@@ -58,6 +59,8 @@ const NO_UPSCALE = "none";
 let currentJob = null;   // the uploaded source we render from
 let uploading = false;   // a multi-file upload is in progress
 let activeJobId = null;  // the job currently being polled
+let activeJobStatus = null;
+let pauseResumeSupported = false;
 let pollTimer = null;
 
 // -- catalogue loading ---------------------------------------------------
@@ -472,18 +475,42 @@ cancelBtn.addEventListener("click", async () => {
   }
 });
 
+pauseBtn.addEventListener("click", async () => {
+  if (!activeJobId) return;
+  const resume = activeJobStatus === "paused";
+  pauseBtn.disabled = true;
+  try {
+    const job = await fetchJson(
+      `/api/jobs/${activeJobId}/${resume ? "resume" : "pause"}`,
+      { method: "POST" },
+    );
+    activeJobStatus = job.status;
+    progressMessage.textContent = job.message || job.status;
+    progressFill.style.width = `${job.progress || 0}%`;
+    pauseBtn.textContent = job.status === "paused" ? "Resume" : "Pause";
+    loadJobs();
+  } catch (err) {
+    showError(err.message || String(err));
+  } finally {
+    pauseBtn.disabled = false;
+  }
+});
+
 function setBusy(busy) {
   previewBtn.disabled = busy || !currentJob;
   renderBtn.disabled = busy || !currentJob;
   cancelBtn.disabled = !busy;
+  pauseBtn.disabled = !busy;
 }
 
 function resetSections() {
   clearInterval(pollTimer);
   clearInterval(beforeTimer);
   activeJobId = null;
+  activeJobStatus = null;
   setBusy(false);
   cancelBtn.disabled = true;
+  pauseBtn.hidden = true;
   progressSection.hidden = true;
   errorSection.hidden = true;
   compareSection.hidden = true;
@@ -501,14 +528,22 @@ function pollJob(jobId) {
   pollTimer = setInterval(async () => {
     try {
       const job = await fetchJson(`/api/jobs/${jobId}`);
+      activeJobStatus = job.status;
       progressMessage.textContent = job.message || job.status;
       progressFill.style.width = `${job.progress || 0}%`;
 
-      if (job.status === "queued" || job.status === "running") return;
+      if (job.status === "queued" || job.status === "running" || job.status === "paused") {
+        pauseBtn.hidden = !pauseResumeSupported || job.pausable === false;
+        pauseBtn.textContent = job.status === "paused" ? "Resume" : "Pause";
+        pauseBtn.disabled = false;
+        return;
+      }
 
       clearInterval(pollTimer);
       activeJobId = null;
+      activeJobStatus = null;
       setBusy(false);
+      pauseBtn.hidden = true;
       progressSection.hidden = true;
       if (job.status === "done") {
         showCompare(job);
@@ -633,7 +668,9 @@ async function loadJobs() {
   for (const job of jobs) {
     const tr = document.createElement("tr");
     const render = job.scale ? describeRender(job) : "not rendered";
-    const status = job.status === "running" ? `${job.status} ${job.progress}%` : job.status;
+    const status = (job.status === "running" || job.status === "paused")
+      ? `${job.status} ${job.progress}%`
+      : job.status;
     const gpu = job.gpu_id === null || job.gpu_id === undefined ? "—" : job.gpu_id;
     tr.innerHTML = `<td title="${job.filename}">${job.filename}</td><td>${render}</td><td>${gpu}</td><td>${status}</td><td class="job-actions"></td>`;
     const actions = tr.querySelector(".job-actions");
@@ -660,7 +697,26 @@ async function loadJobs() {
       });
       actions.appendChild(viewBtn);
     }
-    if (job.status === "running" || job.status === "queued") {
+    if (pauseResumeSupported && job.pausable !== false
+        && (job.status === "running" || job.status === "paused" || job.status === "queued")) {
+      const pauseBtn = document.createElement("button");
+      pauseBtn.type = "button";
+      pauseBtn.className = "small secondary";
+      pauseBtn.textContent = job.status === "paused" ? "Resume" : "Pause";
+      pauseBtn.addEventListener("click", async () => {
+        pauseBtn.disabled = true;
+        const action = job.status === "paused" ? "resume" : "pause";
+        try {
+          await fetchJson(`/api/jobs/${job.id}/${action}`, { method: "POST" });
+          loadJobs();
+        } catch (err) {
+          showError(err.message || String(err));
+        } finally {
+          pauseBtn.disabled = false;
+        }
+      });
+      actions.appendChild(pauseBtn);
+
       const watchBtn = document.createElement("button");
       watchBtn.type = "button";
       watchBtn.className = "small";
@@ -680,6 +736,13 @@ async function loadJobs() {
 // -- init ----------------------------------------------------------------
 
 (async () => {
+  try {
+    const caps = await fetchJson("/api/capabilities");
+    pauseResumeSupported = !!caps.pause_resume;
+  } catch {
+    // Older server process: keep the pause buttons hidden until it restarts.
+    pauseResumeSupported = false;
+  }
   await Promise.all([loadEngines(), loadGpus(), loadEncoders(), loadInterpolators()]);
   await loadPresets();
   loadJobs();

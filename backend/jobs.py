@@ -47,7 +47,7 @@ from .pipeline import Clip, EncodeSettings, Filters, RenderOptions
 
 DATA_DIR = JOBS_DIR
 
-VALID_STATUSES = ("uploaded", "queued", "running", "done", "error", "cancelled")
+VALID_STATUSES = ("uploaded", "queued", "running", "paused", "done", "error", "cancelled")
 #: a render can be (re)started from any of these
 RESTARTABLE = ("uploaded", "done", "error", "cancelled")
 
@@ -94,6 +94,15 @@ class Job:
     subtitle_path: Optional[Path] = None
     created_at: float = field(default_factory=time.time)
     cancel_requested: threading.Event = field(default_factory=threading.Event, repr=False)
+    #: cooperative pause: the render loop blocks on `resume_event` after
+    #: finishing the frame that is in flight, so no GPU work is discarded.
+    pause_requested: threading.Event = field(default_factory=threading.Event, repr=False)
+    resume_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    #: True when pause was requested on a job that had already started, so
+    #: resume only has to wake the worker instead of re-queueing it.
+    paused_while_running: bool = field(default=False, repr=False)
+    #: False for engines that cannot cooperate with the pause signal
+    pausable: bool = True
 
     @property
     def clip(self) -> Clip | None:
@@ -195,6 +204,7 @@ class Job:
             ),
             "download_filename": self.download_filename,
             "output_format": self.output_format,
+            "pausable": self.pausable,
             "created_at": self.created_at,
         }
 
@@ -219,6 +229,7 @@ class Job:
             "output_path": str(self.output_path) if self.output_path else None,
             "before_path": str(self.before_path) if self.before_path else None,
             "subtitle_path": str(self.subtitle_path) if self.subtitle_path else None,
+            "pausable": self.pausable,
             "created_at": self.created_at,
         }
 
@@ -242,6 +253,7 @@ class Job:
             output_path=Path(rec["output_path"]) if rec.get("output_path") else None,
             before_path=Path(rec["before_path"]) if rec.get("before_path") else None,
             subtitle_path=Path(rec["subtitle_path"]) if rec.get("subtitle_path") else None,
+            pausable=bool(rec.get("pausable", True)),
             created_at=float(rec.get("created_at", time.time())),
         )
 
@@ -279,9 +291,36 @@ class _Progress:
         self.save = save
         self.started = time.monotonic()
         self.last_save = self.started
+        self._pause_lock = threading.Lock()
+
+    def _wait_if_paused(self, done: float, verb: str) -> None:
+        """Block here while the user has the render paused.
+
+        The worker parks between frames rather than being killed, so the
+        encoder stays open and resuming continues with the next frame.
+        """
+        job = self.job
+        with self._pause_lock:
+            if not job.pause_requested.is_set():
+                return
+            if job.status != "paused":
+                job.status = "paused"
+            job.message = f"paused · {verb} {int(done)}/{self.total}"
+            self.save(job)
+            while job.pause_requested.is_set() and not job.cancel_requested.is_set():
+                job.resume_event.wait(0.5)
+            job.resume_event.clear()
+            if job.cancel_requested.is_set():
+                return
+            if job.status == "paused":
+                job.status = "running"
+                job.message = f"{verb} frame {int(done)}/{self.total}"
+                self.save(job)
 
     def __call__(self, done: float, verb: str) -> None:
         job = self.job
+        if job.pause_requested.is_set():
+            self._wait_if_paused(done, verb)
         if job.cancel_requested.is_set():
             raise JobCancelled()
         elapsed = time.monotonic() - self.started
@@ -383,7 +422,7 @@ class JobManager:
             job = Job.from_record(json.loads(data))
             if not job.input_path.exists():
                 continue
-            if job.status in ("queued", "running"):
+            if job.status in ("queued", "running", "paused"):
                 job.status = "error"
                 job.message = "interrupted by server restart"
                 job.progress = 0
@@ -496,6 +535,8 @@ class JobManager:
             interp_opts = {}
             options.pop("interpolate", None)
 
+        engine = None
+        interpolator = None
         if engine_name == NO_UPSCALE:
             if not interp_opts:
                 raise ValueError("nothing to do: no upscaling engine and no frame interpolation")
@@ -546,6 +587,11 @@ class JobManager:
         job.engine = engine_name
         job.scale = scale
         job.gpu_id = gpu_id
+        job.pausable = not (
+            (engine is not None and getattr(engine, "pausable", True) is False)
+            or (interp_opts and interpolator is not None
+                and getattr(interpolator, "pausable", True) is False)
+        )
         job.status = "queued"
         job.progress = 0
         job.message = "queued"
@@ -559,18 +605,73 @@ class JobManager:
             job.before_path.unlink(missing_ok=True)
             job.before_path = None
         job.cancel_requested.clear()
+        job.pause_requested.clear()
+        job.resume_event.clear()
+        job.paused_while_running = False
         self._save(job)
         self._queues[gpu_id].put(job_id)
+        return job
+
+    def pause(self, job_id: str) -> Job:
+        job = self.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if not job.pausable:
+            raise RuntimeError(
+                f"job {job_id} uses an engine that cannot pause; cancel it instead"
+            )
+        if job.status == "queued":
+            # Drop out of the queue; resume() puts it back. The worker may
+            # still pick up the stale id and will skip it because the status
+            # is no longer "queued".
+            job.paused_while_running = False
+            job.pause_requested.set()
+            job.status = "paused"
+            job.message = "paused"
+            self._save(job)
+            return job
+        if job.status != "running":
+            raise RuntimeError(f"job {job_id} is {job.status}, nothing to pause")
+        job.paused_while_running = True
+        job.pause_requested.set()
+        job.resume_event.clear()
+        job.status = "paused"
+        job.message = "pausing…"
+        self._save(job)
+        return job
+
+    def resume(self, job_id: str) -> Job:
+        job = self.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.status != "paused":
+            raise RuntimeError(f"job {job_id} is {job.status}, not paused")
+        job.pause_requested.clear()
+        job.resume_event.set()
+        if job.paused_while_running:
+            job.paused_while_running = False
+            job.status = "running"
+            job.message = "resuming"
+            self._save(job)
+            return job
+        job.status = "queued"
+        job.message = "queued"
+        gpu_id = job.gpu_id if job.gpu_id in self._queues else self._pick_gpu()
+        job.gpu_id = gpu_id
+        self._save(job)
+        self._queues[gpu_id].put(job.id)
         return job
 
     def cancel(self, job_id: str) -> Job:
         job = self.get(job_id)
         if job is None:
             raise KeyError(job_id)
-        if job.status not in ("queued", "running"):
+        if job.status not in ("queued", "running", "paused"):
             raise RuntimeError(f"job {job_id} is {job.status}, nothing to cancel")
         job.cancel_requested.set()
-        if job.status == "queued":
+        job.pause_requested.clear()
+        job.resume_event.set()  # wake a paused render so it can see the cancel
+        if job.status in ("queued", "paused") and not job.paused_while_running:
             self._finish(job, "cancelled", "cancelled")
         else:
             job.message = "cancelling…"
@@ -631,6 +732,21 @@ class JobManager:
         return None
 
     def _process(self, job: Job) -> None:
+        if job.cancel_requested.is_set():
+            raise JobCancelled()
+        if job.pause_requested.is_set():
+            # The pause landed after the worker dequeued the job but before
+            # it started; park it the same way a running pause does.
+            job.paused_while_running = True
+            job.status = "paused"
+            job.message = "paused"
+            self._save(job)
+            while job.pause_requested.is_set() and not job.cancel_requested.is_set():
+                job.resume_event.wait(0.5)
+            job.resume_event.clear()
+            if job.cancel_requested.is_set():
+                raise JobCancelled()
+        job.paused_while_running = False
         job.status = "running"
         job.message = "probing video"
         self._save(job)

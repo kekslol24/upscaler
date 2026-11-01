@@ -73,10 +73,20 @@ further gain for this path.
   `https://rocm.nightlies.amd.com/whl-multi-arch/` (newer/less mature stack).
 - Vulkan ncnn engines work out of the box on AMD (Mesa RADV on Linux, the
   vendor driver on Windows).
-- ONNX upscaler on Linux AMD is the gap: ORT >= 1.23 removed
-  `ROCMExecutionProvider`; AMD now ships the MIGraphX plugin
-  (`onnxruntime-ep-migraphx`), which `_GPU_PROVIDERS` does not register. Use
-  the Vulkan upscaler or add MIGraphX support. On Windows, DirectML covers it.
+- ONNX upscaler on Linux AMD now works. The gfx1200 PyTorch wheel ships ROCm
+  10.1 / `libamdhip64.so.7`, so `setup_amd.sh` installs
+  `onnxruntime-rocm==1.22.2.post3`; `post1` (ROCm 6) is kept for native ROCm 6
+  installs. `_GPU_PROVIDERS` includes both `ROCMExecutionProvider` and
+  `MIGraphXExecutionProvider`.
+- Mixing `onnxruntime-rocm==1.22.2.post1` (system ROCm 6.4) with the ROCm 10.1
+  PyTorch wheel segfaults when both providers are used in one process. The
+  post3 wheel shares `libamdhip64.so.7` with torch; it also needs a
+  `librocm_smi64.so.1` alias for the system `librocm_smi64.so.7`, which
+  `run.sh`, `launcher.py` and `setup_amd.sh` create in
+  `~/.cache/upscaler/rocm-libs`.
+- Verified end-to-end through the API on the 9060 XT: ONNX-only, RIFE-only,
+  ONNX after RIFE in the same server process, and RIFE+ONNX combined all
+  complete without errors. Tests stay CPU-only via the `cpu_engine` fixture.
 - Performance is not measured here (no AMD hardware): the 9060 XT has roughly
   1/8 the FP32 compute and 1/3 the bandwidth of a 4090, so 4K RIFE is likely
   below real-time; 1080p should be comfortable. Benchmark on the card.
