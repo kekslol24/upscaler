@@ -119,13 +119,11 @@ def test_preview_then_full_render_and_persistence(manager, tiny_video, cpu_engin
     assert job.status == "done", job.message
     assert job.output_path.name == "output.mp4"
     assert pipeline.probe(job.output_path).estimated_frames == 12
-    # MKV upload isn't browser playable, so a proxy is produced for the compare
-    # view — after the job is already reported done
-    deadline = time.time() + 60
-    while job.before_path is None and time.time() < deadline:
-        time.sleep(0.2)
-    assert job.before_path is not None and job.before_path.name == "input_proxy.mp4"
-    assert job.to_public_dict()["before_ready"] and job.to_public_dict()["output_path"]
+    # A full render has no before/after comparison and must not spend time
+    # building a source proxy (that would delay the next queued job).
+    assert job.before_path is None
+    assert not job.to_public_dict()["before_ready"]
+    assert job.to_public_dict()["output_path"]
 
     # a fresh manager on the same directory sees the finished job
     from backend.jobs import JobManager

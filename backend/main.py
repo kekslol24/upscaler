@@ -218,12 +218,13 @@ def job_input(job_id: str):
 
 @app.get("/api/jobs/{job_id}/before")
 def job_before(job_id: str):
-    """The source side of the compare view, matching the rendered window."""
+    """The source side of the compare view for a preview render."""
     job = manager.get(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    path = job.before_path if job.before_path and job.before_path.exists() else job.input_path
-    return FileResponse(path)
+    if job.before_path is None or not job.before_path.exists():
+        raise HTTPException(409, "no comparison available for this job")
+    return FileResponse(job.before_path)
 
 
 @app.get("/api/jobs/{job_id}/output")

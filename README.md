@@ -269,8 +269,10 @@ N× the disk. A 1-GPU machine behaves exactly as before.
   secondary link when it exists.
 - Audio is stream-copied when it is MP4-friendly (AAC/MP3/AC3) and
   transcoded to AAC otherwise (Opus/FLAC/DTS from MKV sources).
-- The before/after view gets a browser-playable H.264 proxy of the source
-  window when the upload itself isn't playable (10-bit HEVC in MKV, say).
+- Only preview renders get a before/after comparison. The source window is
+  turned into a browser-playable H.264 proxy when the upload itself isn't
+  playable (10-bit HEVC in MKV, say). Full renders skip that pass so the GPU
+  worker can start the next queued job immediately.
 
 ### Output container, subtitles and audio
 

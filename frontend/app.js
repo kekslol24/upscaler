@@ -45,9 +45,6 @@ const playPauseBtn = $("playPauseBtn");
 const downloadLink = $("downloadLink");
 const downloadAltLink = $("downloadAltLink");
 const outputPath = $("outputPath");
-const beforeHint = $("beforeHint");
-let beforeTimer = null;
-
 const jobsSection = $("jobsSection");
 const jobsBody = $("jobsBody");
 
@@ -505,7 +502,6 @@ function setBusy(busy) {
 
 function resetSections() {
   clearInterval(pollTimer);
-  clearInterval(beforeTimer);
   activeJobId = null;
   activeJobStatus = null;
   setBusy(false);
@@ -574,32 +570,30 @@ function describeRender(job) {
   return parts.join(" · ");
 }
 
-function showCompare(job) {
-  compareTitle.textContent = `Before / After — ${describeRender(job)}`;
+function showCompare(job, compareOverride) {
+  const compare = compareOverride === undefined
+    ? Boolean(job.options && job.options.clip && job.before_ready)
+    : Boolean(compareOverride && job.before_ready);
+  compareTitle.textContent = compare
+    ? `Before / After — ${describeRender(job)}`
+    : `Result — ${describeRender(job)}`;
   videoAfter.src = `/api/jobs/${job.id}/output`;
   outputPath.textContent = job.output_path ? `Saved to ${job.output_path}` : "";
-  clearInterval(beforeTimer);
-  if (job.before_ready) {
+  if (compare) {
+    videoBefore.hidden = false;
+    compareDivider.hidden = false;
+    compareRange.hidden = false;
+    videoAfter.muted = true;
     videoBefore.src = `/api/jobs/${job.id}/before`;
-    beforeHint.hidden = true;
+    setSlider(50);
   } else {
-    // full renders report done before the source-side copy exists
+    // A full render has no source-side comparison; show the result on its own.
+    videoBefore.hidden = true;
     videoBefore.removeAttribute("src");
-    beforeHint.hidden = false;
-    beforeTimer = setInterval(async () => {
-      try {
-        const fresh = await fetchJson(`/api/jobs/${job.id}`);
-        if (fresh.before_ready || fresh.status !== "done") {
-          clearInterval(beforeTimer);
-          if (fresh.before_ready) {
-            videoBefore.src = `/api/jobs/${job.id}/before`;
-            beforeHint.hidden = true;
-          }
-        }
-      } catch {
-        clearInterval(beforeTimer);
-      }
-    }, 3000);
+    compareDivider.hidden = true;
+    compareRange.hidden = true;
+    videoAfter.muted = false;
+    videoAfter.style.clipPath = "none";
   }
   const mkvPrimary = job.output_format === "mkv" && job.has_subtitle_output;
   downloadLink.href = `/api/jobs/${job.id}/output?download=1`;
@@ -622,7 +616,7 @@ function showCompare(job) {
   }
   compareSection.hidden = false;
   playPauseBtn.textContent = "Play";
-  setSlider(50);
+  if (compare) setSlider(50);
   compareSection.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -635,13 +629,14 @@ function setSlider(pct) {
 compareRange.addEventListener("input", (e) => setSlider(Number(e.target.value)));
 
 playPauseBtn.addEventListener("click", () => {
-  if (videoBefore.paused) {
-    videoBefore.play();
-    videoAfter.play();
+  const primary = videoBefore.hidden ? videoAfter : videoBefore;
+  if (primary.paused) {
+    primary.play();
+    if (primary === videoBefore) videoAfter.play();
     playPauseBtn.textContent = "Pause";
   } else {
-    videoBefore.pause();
-    videoAfter.pause();
+    primary.pause();
+    if (primary === videoBefore) videoAfter.pause();
     playPauseBtn.textContent = "Play";
   }
 });
@@ -716,13 +711,20 @@ async function loadJobs() {
         }
       });
       actions.appendChild(pauseBtn);
-
+    }
+    if (job.status === "running" || job.status === "paused" || job.status === "queued"
+        || (job.status === "done" && job.has_output)) {
       const watchBtn = document.createElement("button");
       watchBtn.type = "button";
       watchBtn.className = "small";
       watchBtn.textContent = "Watch";
       watchBtn.addEventListener("click", () => {
         resetSections();
+        if (job.status === "done") {
+          // play the result on its own, without a before/after comparison
+          showCompare(job, false);
+          return;
+        }
         setBusy(true);
         progressSection.hidden = false;
         pollJob(job.id);

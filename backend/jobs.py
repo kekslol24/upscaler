@@ -789,20 +789,13 @@ class JobManager:
         if options.clip is not None:
             # previews are short: build the matching source clip before reporting done
             job.before_path = self._before_video(job, options.clip)
-            job.progress = 100
-            self._finish(job, "done", done_message)
-            return
-        # a full render is done — and downloadable — as soon as the file is;
-        # the browser-playable copy of the source for the compare view can
-        # take minutes for a long episode, so it is built afterwards
-        job.before_path = None
+        else:
+            # A full render has no before/after view: building a source proxy
+            # would hold the GPU worker (and the next queued job) hostage for
+            # minutes just to enable a comparison nobody needs.
+            job.before_path = None
         job.progress = 100
         self._finish(job, "done", done_message)
-        try:
-            job.before_path = self._before_video(job, None)
-        except Exception as exc:  # noqa: BLE001 - the render itself succeeded
-            job.message = f"done (no comparison copy: {exc})"
-        self._save(job)
 
     def _run_streaming(
         self,
@@ -1031,21 +1024,12 @@ class JobManager:
         if writer.wait() != 0:
             raise RuntimeError(f"writing chunk frames failed ({writer.returncode}): {err}")
 
-    def _before_video(self, job: Job, clip: Clip | None) -> Path:
-        """The source side of the compare view: the matching window as a
-        browser-playable proxy, or the upload itself when that already is."""
-        if clip is not None:
-            proxy = job.dir / "preview_before.mp4"
-            job.message = "preparing comparison clip"
-            pipeline.make_proxy(job.input_path, proxy, clip)
-            return proxy
-        if pipeline.is_browser_playable(job.input_path):
-            return job.input_path
-        proxy = job.dir / "input_proxy.mp4"
-        if not proxy.exists():
-            job.message = "done · preparing the source copy for the compare view"
-            pipeline.make_proxy(job.input_path, proxy)
-            job.message = "done"
+    def _before_video(self, job: Job, clip: Clip) -> Path:
+        """The source side of the compare view: the preview window as a
+        browser-playable proxy. Full renders skip this entirely."""
+        proxy = job.dir / "preview_before.mp4"
+        job.message = "preparing comparison clip"
+        pipeline.make_proxy(job.input_path, proxy, clip)
         return proxy
 
 
