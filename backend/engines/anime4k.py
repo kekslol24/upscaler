@@ -18,15 +18,13 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 import shutil
 import subprocess
-import sys
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import pipeline, proc
+from .. import pipeline, proc, wininterop
 from ..paths import DATA_DIR, MODELS_DIR
 from .base import ProgressCallback, UpscaleEngine
 
@@ -52,15 +50,6 @@ class _Backend:
     windows_interop: bool
 
 
-def _is_wsl() -> bool:
-    if sys.platform == "win32":
-        return False
-    try:
-        return "microsoft" in Path("/proc/version").read_text(errors="ignore").lower()
-    except OSError:
-        return False
-
-
 def _has_libplacebo(binary: str) -> bool:
     try:
         out = proc.run(
@@ -73,42 +62,12 @@ def _has_libplacebo(binary: str) -> bool:
     return " libplacebo " in out
 
 
-def _windows_ffmpeg() -> str | None:
-    if not _is_wsl():
-        return None
-    cmd = shutil.which("cmd.exe") or "/mnt/c/Windows/System32/cmd.exe"
-    if not os.path.isfile(cmd):
-        return None
-    try:
-        out = proc.run(
-            [cmd, "/c", "where", "ffmpeg"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, errors="replace", timeout=20,
-        ).stdout
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    for line in out.splitlines():
-        win_path = line.strip()
-        if not win_path:
-            continue
-        try:
-            host_path = proc.run(
-                ["wslpath", "-u", win_path],
-                capture_output=True, text=True, timeout=10, check=True,
-            ).stdout.strip()
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-            continue
-        if host_path and os.path.isfile(host_path):
-            return host_path
-    return None
-
-
 @functools.lru_cache(maxsize=1)
 def _backend() -> _Backend | None:
     # Prefer the native Windows ffmpeg under WSL; Dozen's Vulkan path is
     # several times slower for these shaders.
-    if _is_wsl():
-        binary = _windows_ffmpeg()
+    if wininterop.is_wsl():
+        binary = wininterop.windows_ffmpeg()
         if binary and _has_libplacebo(binary):
             return _Backend(binary, windows_interop=True)
     binary = shutil.which("ffmpeg")
@@ -141,13 +100,7 @@ def _host_path(path: Path, backend: _Backend) -> str:
     """Translate a WSL path for a Windows ffmpeg (e.g. to a UNC path)."""
     if not backend.windows_interop:
         return str(path)
-    try:
-        return proc.run(
-            ["wslpath", "-w", str(path)],
-            capture_output=True, text=True, timeout=10, check=True,
-        ).stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return str(path)
+    return wininterop.host_path(path)
 
 
 def _png_size(path: Path) -> tuple[int, int]:
@@ -169,19 +122,6 @@ def _libplacebo_filter(
     )
 
 
-@functools.lru_cache(maxsize=8)
-def _encoder_available(binary: str, name: str) -> bool:
-    try:
-        out = proc.run(
-            [binary, "-hide_banner", "-encoders"],
-            capture_output=True, text=True, errors="replace",
-            timeout=20, check=True,
-        ).stdout
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return False
-    return f" {name} " in out
-
-
 def _encode_args(
     settings: pipeline.EncodeSettings, container: str, backend: _Backend
 ) -> list[str]:
@@ -189,7 +129,7 @@ def _encode_args(
     # which the Linux ffmpeg's encoder probe does not know about.
     if backend.windows_interop and settings.encoder == "auto":
         name = "hevc_amf" if settings.codec == "hevc" else "h264_amf"
-        if _encoder_available(backend.ffmpeg, name):
+        if wininterop.encoder_available(backend.ffmpeg, name):
             settings = replace(settings, encoder=name)
     return pipeline.encode_args(settings, container)
 

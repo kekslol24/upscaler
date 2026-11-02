@@ -20,11 +20,11 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
-from . import proc
+from . import proc, wininterop
 from .paths import DATA_DIR
 
 
@@ -81,7 +81,7 @@ _DENOISE_LEVELS = {
 
 @dataclass(frozen=True)
 class EncodeSettings:
-    codec: str = "h264"          # "h264" | "hevc"
+    codec: str = "hevc"          # "h264" | "hevc"
     encoder: str = "auto"        # "auto" or an ffmpeg encoder name
     #: CRF / CQ style quality, lower is better; 18 is visually lossless-ish
     quality: int = 18
@@ -204,6 +204,14 @@ def resolve_encoder(settings: EncodeSettings) -> str:
     raise RuntimeError(f"no working {settings.codec} encoder found")
 
 
+def _writer_ffmpeg(settings: EncodeSettings) -> tuple[str, bool, EncodeSettings]:
+    if settings.codec == "hevc" and settings.encoder == "auto" and wininterop.is_wsl():
+        binary = wininterop.windows_ffmpeg()
+        if binary and wininterop.encoder_available(binary, "hevc_amf"):
+            return binary, True, replace(settings, encoder="hevc_amf")
+    return "ffmpeg", False, settings
+
+
 def encode_args(settings: EncodeSettings, container: str = "mp4") -> list[str]:
     """Video encoder arguments for the chosen encoder at the requested
     quality. Each encoder family spells constant-quality differently."""
@@ -226,6 +234,8 @@ def encode_args(settings: EncodeSettings, container: str = "mp4") -> list[str]:
     if encoder_codec(enc) == "hevc" and container == "mp4":
         # Apple/Windows players only recognise HEVC in MP4 under this tag
         args += ["-tag:v", "hvc1"]
+    if container in ("mkv", "matroska"):
+        args += ["-max_interleave_delta", "0"]
     return args
 
 
@@ -407,6 +417,8 @@ def concat_segments(
         cmd += ["-map", "1:a"] + _audio_args(audio_source)
     if encoder_codec(resolve_encoder(options.encode)) == "hevc" and output_path.suffix == ".mp4":
         cmd += ["-tag:v", "hvc1"]
+    if output_path.suffix == ".mkv":
+        cmd += ["-max_interleave_delta", "0"]
     cmd.append(str(output_path))
     try:
         proc.run(cmd, check=True)
@@ -455,23 +467,33 @@ def open_frame_writer(
     ~30 ms per 4K frame and was the streaming bottleneck."""
     _require_ffmpeg()
     options = options or RenderOptions()
+    is_png = str(target).endswith(".png")
+    binary = "ffmpeg"
+    windows_interop = False
+    settings = options.encode
+    if not is_png:
+        binary, windows_interop, settings = _writer_ffmpeg(settings)
+
+    def path_arg(path: Path) -> str:
+        return wininterop.host_path(path) if windows_interop else str(path)
+
     cmd = [
-        "ffmpeg", "-y", "-v", "error",
+        binary, "-y", "-v", "error",
         "-f", "rawvideo", "-pix_fmt", pix_fmt,
         "-s", f"{width}x{height}", "-framerate", frame_rate,
         "-i", "-",
     ]
     if audio_source is not None:
-        cmd += [*_clip_input_args(options.clip), "-i", str(audio_source)]
+        cmd += [*_clip_input_args(options.clip), "-i", path_arg(audio_source)]
     cmd += ["-map", "0:v"]
     if audio_source is not None:
         cmd += ["-map", "1:a"] + _audio_args(audio_source)
-    if str(target).endswith(".png"):
+    if is_png:
         cmd += ["-start_number", "0", "-compression_level", "1"]
     else:
         cmd += _vf_args(options.filters.post())
-        cmd += encode_args(options.encode, target.suffix.lstrip("."))
-    cmd.append(str(target))
+        cmd += encode_args(settings, target.suffix.lstrip("."))
+    cmd.append(path_arg(target))
     return proc.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
@@ -535,13 +557,13 @@ def mux_subtitles(
         "-map_chapters", "0",
     ]
     try:
-        proc.run([*base, "-c", "copy", str(output_path)],
+        proc.run([*base, "-c", "copy", "-max_interleave_delta", "0", str(output_path)],
                  capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError:
         # e.g. mov_text (MP4) -> Matroska: convert text subtitles to ASS.
         proc.run(
             [*base, "-c:v", "copy", "-c:a", "copy", "-c:t", "copy",
-             "-c:s", "ass", str(output_path)],
+             "-c:s", "ass", "-max_interleave_delta", "0", str(output_path)],
             capture_output=True, text=True, check=True,
         )
 

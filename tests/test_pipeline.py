@@ -41,6 +41,11 @@ def test_encode_args_quality_per_encoder_family():
     assert hevc[-2:] == ["-tag:v", "hvc1"]
 
 
+def test_mkv_encode_args_disable_interleave_buffering():
+    args = pipeline.encode_args(EncodeSettings(encoder="libx264"), container="mkv")
+    assert args[-2:] == ["-max_interleave_delta", "0"]
+
+
 def test_encoder_codec():
     assert pipeline.encoder_codec("libx265") == "hevc"
     assert pipeline.encoder_codec("hevc_amf") == "hevc"

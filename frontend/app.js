@@ -241,7 +241,7 @@ function applyPreset(preset) {
   }
   updateInterpHint();
   const enc = preset.encode || {};
-  codecSelect.value = enc.codec || "h264";
+  codecSelect.value = enc.codec || "hevc";
   updateEncoderOptions();
   encoderSelect.value = enc.encoder || "auto";
   qualityInput.value = enc.quality || 18;

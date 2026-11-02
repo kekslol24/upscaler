@@ -130,7 +130,7 @@ class Job:
                 sharpen=bool(f.get("sharpen", False)),
             ),
             encode=EncodeSettings(
-                codec=str(e.get("codec", "h264")),
+                codec=str(e.get("codec", "hevc")),
                 encoder=str(e.get("encoder", "auto")),
                 quality=int(e.get("quality", 18)),
                 format=fmt,
