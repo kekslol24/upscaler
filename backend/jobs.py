@@ -142,6 +142,15 @@ class Job:
         fmt = str((self.options.get("encode") or {}).get("format", "mp4")).lower()
         return fmt if fmt in ("mp4", "mkv") else "mp4"
 
+    @property
+    def subtitle_format(self) -> str:
+        fmt = str((self.options.get("encode") or {}).get("subtitles", "copy")).lower()
+        if fmt not in pipeline.SUBTITLE_FORMATS:
+            raise ValueError(
+                f"subtitles must be one of {', '.join(pipeline.SUBTITLE_FORMATS)}"
+            )
+        return fmt
+
     def _output_name(self, ext: str) -> str:
         stem = Path(self.original_filename).stem or "video"
         parts = []
@@ -511,6 +520,42 @@ class JobManager:
             jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
 
+    def delete(self, job_id: str) -> None:
+        """Remove a finished job, its database row and its files.
+
+        Active jobs are refused: cancel them first so a worker is not
+        writing into a directory that is being deleted."""
+        job = self.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.status not in RESTARTABLE:
+            raise RuntimeError(f"job {job_id} is {job.status}; cancel it first")
+        with self._lock:
+            self._jobs.pop(job_id, None)
+        try:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        finally:
+            try:
+                job.dir.resolve().relative_to(self.data_dir.resolve())
+            except ValueError:
+                pass
+            else:
+                shutil.rmtree(job.dir, ignore_errors=True)
+
+    def clear(self) -> int:
+        """Delete every finished/uploaded job. Returns the count removed."""
+        with self._lock:
+            ids = [job.id for job in self._jobs.values() if job.status in RESTARTABLE]
+        deleted = 0
+        for job_id in ids:
+            try:
+                self.delete(job_id)
+            except (KeyError, RuntimeError):
+                continue
+            deleted += 1
+        return deleted
+
     def _pick_gpu(self) -> int | None:
         """Least busy worker: queued plus currently running jobs."""
         return min(
@@ -581,6 +626,7 @@ class JobManager:
         try:
             job.options = options
             job.render_options()
+            job.subtitle_format
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid render options: {exc}") from exc
 
@@ -725,7 +771,9 @@ class JobManager:
         target = job.dir / ("preview_subs.mkv" if job.clip else "output_subs.mkv")
         job.message = "muxing subtitles"
         try:
-            pipeline.mux_subtitles(output_path, job.input_path, target, job.clip)
+            pipeline.mux_subtitles(
+                output_path, job.input_path, target, job.clip, job.subtitle_format,
+            )
         except Exception as exc:  # noqa: BLE001 - the render itself succeeded
             return str(exc)
         job.subtitle_path = target

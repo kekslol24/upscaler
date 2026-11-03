@@ -16,10 +16,13 @@ before/after the model (Filters), and how to encode (EncodeSettings).
 from __future__ import annotations
 
 import functools
+import html
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -536,22 +539,139 @@ def has_subtitles(path: Path) -> bool:
     return bool(out.strip())
 
 
+# -- subtitles ----------------------------------------------------------------
+
+#: text subtitle codecs that can be converted between ASS and SRT
+TEXT_SUBTITLE_CODECS = {
+    "ass", "ssa", "subrip", "srt", "mov_text", "webvtt", "text",
+    "microdvd", "subviewer", "subviewer1", "sami", "realtext", "stl",
+    "eia_608", "hdmv_text_subtitle",
+}
+
+#: how mux_subtitles() treats the source's subtitle streams
+SUBTITLE_FORMATS = ("copy", "ass", "srt")
+
+
+def probe_subtitles(path: Path) -> list[dict]:
+    """Subtitle streams plus the metadata needed to keep them useful."""
+    try:
+        out = proc.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "s",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title:"
+                "stream_disposition=default,forced",
+                "-of", "json", str(path),
+            ],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return []
+    streams = []
+    for stream in json.loads(out).get("streams", []):
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        streams.append({
+            "index": int(stream["index"]),
+            "codec": stream.get("codec_name", ""),
+            "language": tags.get("language"),
+            "title": tags.get("title"),
+            "default": bool(disposition.get("default", 0)),
+            "forced": bool(disposition.get("forced", 0)),
+        })
+    return streams
+
+
+def has_text_subtitles(path: Path) -> bool:
+    """True if the file has at least one subtitle that can be converted."""
+    return any(sub["codec"] in TEXT_SUBTITLE_CODECS for sub in probe_subtitles(path))
+
+
+def _clean_srt(text: str) -> str:
+    """ffmpeg's ASS->SRT conversion keeps libass markup; strip it so
+    players that render SRT natively show the dialogue, not the tags.
+    Cues that contained only tags/positioning are dropped."""
+    text = re.sub(r"\{\\[^}]*\}", "", text)
+    text = re.sub(r"<[^>]*>", "", text)
+    text = html.unescape(text)
+    cues = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = block.splitlines()
+        if len(lines) < 3 or not "\n".join(lines[2:]).strip():
+            continue
+        lines[0] = str(len(cues) + 1)
+        cues.append("\n".join(lines))
+    return "\n\n".join(cues) + ("\n" if cues else "")
+
+
 def mux_subtitles(
     video_path: Path,
     source_path: Path,
     output_path: Path,
     clip: Clip | None = None,
+    subtitle_format: str = "copy",
 ) -> None:
-    """Copy the rendered video/audio plus the source's subtitle and font
-    streams into an MKV. Nothing is re-encoded, so ASS/PGS styling and
-    fonts survive; MP4 cannot carry those codecs."""
+    """Copy the rendered video/audio plus the source's subtitle streams
+    into an MKV. The video and audio are never re-encoded.
+
+    subtitle_format:
+      copy - keep the source subtitle codecs (ASS/PGS) and fonts as-is
+      ass  - convert text subtitles to ASS, keep image subtitles
+      srt  - convert text subtitles to SRT and drop image subtitles, so
+             players that cannot render ASS/PGS can direct-play the file
+    """
     _require_ffmpeg()
+    fmt = subtitle_format.lower()
+    if fmt not in SUBTITLE_FORMATS:
+        raise ValueError(f"subtitle format must be one of {SUBTITLE_FORMATS}")
+    if fmt == "copy":
+        _mux_subtitles_copy(video_path, source_path, output_path, clip)
+    elif fmt == "ass":
+        _mux_subtitles_ass(video_path, source_path, output_path, clip)
+    else:
+        _mux_subtitles_srt(video_path, source_path, output_path, clip)
+
+
+def _mux_inputs(
+    video_path: Path,
+    source_path: Path,
+    clip: Clip | None,
+) -> list[str]:
+    """ffmpeg prefix: rendered video, then the (clipped) subtitle source."""
     base = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path)]
     if clip is not None:
         # input options apply to the next -i (the subtitle source)
         base += ["-ss", f"{clip.start:.3f}", "-t", f"{clip.duration:.3f}"]
-    base += [
-        "-i", str(source_path),
+    base += ["-i", str(source_path)]
+    return base
+
+
+def _subtitle_metadata_args(subs: list[dict]) -> list[str]:
+    args = []
+    any_default = any(sub["default"] for sub in subs)
+    for i, sub in enumerate(subs):
+        flags = []
+        if sub["default"] or (i == 0 and not any_default):
+            flags.append("default")
+        if sub["forced"]:
+            flags.append("forced")
+        args += [f"-disposition:s:{i}", "+".join(flags) if flags else "0"]
+        if sub.get("language"):
+            args += [f"-metadata:s:s:{i}", f"language={sub['language']}"]
+        if sub.get("title"):
+            args += [f"-metadata:s:s:{i}", f"title={sub['title']}"]
+    return args
+
+
+def _mux_subtitles_copy(
+    video_path: Path,
+    source_path: Path,
+    output_path: Path,
+    clip: Clip | None,
+) -> None:
+    """Stream-copy every subtitle/font stream; ASS/PGS styling survives."""
+    base = [
+        *_mux_inputs(video_path, source_path, clip),
         "-map", "0:v:0", "-map", "0:a?",
         "-map", "1:s?", "-map", "1:t?",
         "-map_chapters", "0",
@@ -566,6 +686,80 @@ def mux_subtitles(
              "-c:s", "ass", "-max_interleave_delta", "0", str(output_path)],
             capture_output=True, text=True, check=True,
         )
+
+
+def _mux_subtitles_ass(
+    video_path: Path,
+    source_path: Path,
+    output_path: Path,
+    clip: Clip | None,
+) -> None:
+    """Convert text subtitles to ASS; image subtitles and fonts are copied."""
+    subs = probe_subtitles(source_path)
+    cmd = [
+        *_mux_inputs(video_path, source_path, clip),
+        "-map", "0:v:0", "-map", "0:a?",
+    ]
+    for sub in subs:
+        cmd += ["-map", f"1:{sub['index']}"]
+    cmd += [
+        "-map", "1:t?", "-map_chapters", "0",
+        "-c:v", "copy", "-c:a", "copy", "-c:t", "copy", "-c:s", "copy",
+    ]
+    for i, sub in enumerate(subs):
+        if sub["codec"] in TEXT_SUBTITLE_CODECS:
+            cmd += [f"-c:s:{i}", "ass"]
+    cmd += _subtitle_metadata_args(subs)
+    cmd += ["-max_interleave_delta", "0", str(output_path)]
+    proc.run(cmd, capture_output=True, text=True, check=True)
+
+
+def _mux_subtitles_srt(
+    video_path: Path,
+    source_path: Path,
+    output_path: Path,
+    clip: Clip | None,
+) -> None:
+    """Convert text subtitles to SRT and drop image subtitles/fonts.
+
+    SRT is rendered client-side by Android/Android TV, so the video can
+    direct-play instead of being re-encoded for subtitle burn-in.
+    """
+    all_subs = probe_subtitles(source_path)
+    subs = [sub for sub in all_subs if sub["codec"] in TEXT_SUBTITLE_CODECS]
+    if not subs:
+        if all_subs:
+            raise RuntimeError("no text subtitles to convert to SRT")
+        _mux_subtitles_copy(video_path, source_path, output_path, clip)
+        return
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        extract = ["ffmpeg", "-y", "-v", "error"]
+        if clip is not None:
+            extract += ["-ss", f"{clip.start:.3f}", "-t", f"{clip.duration:.3f}"]
+        extract += ["-i", str(source_path)]
+        for i, sub in enumerate(subs):
+            extract += ["-map", f"0:{sub['index']}", "-c:s", "srt", str(tmp / f"{i}.srt")]
+        proc.run(extract, capture_output=True, text=True, check=True)
+
+        for i in range(len(subs)):
+            path = tmp / f"{i}.srt"
+            path.write_text(_clean_srt(path.read_text(encoding="utf-8")), encoding="utf-8")
+
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path)]
+        for i in range(len(subs)):
+            cmd += ["-i", str(tmp / f"{i}.srt")]
+        cmd += ["-map", "0:v:0", "-map", "0:a?"]
+        for i in range(len(subs)):
+            cmd += ["-map", f"{i + 1}:0"]
+        cmd += [
+            "-map_chapters", "0",
+            "-c:v", "copy", "-c:a", "copy", "-c:s", "srt",
+        ]
+        cmd += _subtitle_metadata_args(subs)
+        cmd += ["-max_interleave_delta", "0", str(output_path)]
+        proc.run(cmd, capture_output=True, text=True, check=True)
 
 
 def make_proxy(input_path: Path, output_path: Path, clip: Clip | None = None) -> None:

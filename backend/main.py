@@ -208,6 +208,22 @@ def job_status(job_id: str):
     return job.to_public_dict()
 
 
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str):
+    try:
+        manager.delete(job_id)
+    except KeyError:
+        raise HTTPException(404, "job not found")
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+    return {"deleted": job_id}
+
+
+@app.delete("/api/jobs")
+def clear_jobs():
+    return {"deleted": manager.clear()}
+
+
 @app.get("/api/jobs/{job_id}/input")
 def job_input(job_id: str):
     job = manager.get(job_id)

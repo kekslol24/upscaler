@@ -99,12 +99,20 @@
           <span>Container</span>
           <select id="formatSelect">
             <option value="mp4">MP4 (browser)</option>
-            <option value="mkv">MKV (keeps ASS/PGS subtitles)</option>
+            <option value="mkv">MKV (keeps subtitles)</option>
           </select>
         </label>
         <label class="field">
           <span>Encoder</span>
           <select id="encoderSelect"></select>
+        </label>
+        <label class="field">
+          <span>Subtitles</span>
+          <select id="subtitlesSelect">
+            <option value="copy">Keep original (ASS/PGS)</option>
+            <option value="srt">SRT (text, direct-play)</option>
+            <option value="ass">ASS (styled text)</option>
+          </select>
         </label>
         <label class="field">
           <span>Quality (CRF, lower = better)</span>
@@ -167,7 +175,10 @@
     </section>
 
     <section id="jobsSection" hidden>
-      <h2>Recent jobs</h2>
+      <div class="section-header">
+        <h2>Recent jobs</h2>
+        <button type="button" id="clearJobsBtn" class="secondary small" hidden>Clear all</button>
+      </div>
       <table class="jobs">
         <thead>
           <tr><th>File</th><th>Render</th><th>GPU</th><th>Status</th><th></th></tr>
@@ -177,6 +188,6 @@
     </section>
   </main>
 
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=6"></script>
 </body>
 </html>

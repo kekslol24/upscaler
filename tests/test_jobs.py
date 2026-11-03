@@ -2,6 +2,7 @@
 CPU ONNX provider with a tiny clip."""
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -84,6 +85,31 @@ def test_chunked_upload_rejects_missing_chunk(manager, tiny_video):
         manager.create_job_from_upload(upload_id, "tiny.mkv")
 
 
+def test_delete_and_clear_jobs(manager, tiny_video):
+    done = manager.create_job("done.mkv", tiny_video.read_bytes())
+    running = manager.create_job("running.mkv", tiny_video.read_bytes())
+    uploaded = manager.create_job("uploaded.mkv", tiny_video.read_bytes())
+    done.status = "done"
+    manager._save(done)
+    running.status = "running"
+    manager._save(running)
+
+    with pytest.raises(RuntimeError):
+        manager.delete(running.id)
+
+    manager.delete(done.id)
+    assert manager.get(done.id) is None
+    assert not done.dir.exists()
+
+    assert manager.clear() == 1
+    assert manager.get(uploaded.id) is None
+    assert not uploaded.dir.exists()
+    assert manager.get(running.id) is not None
+    with manager._connect() as conn:
+        ids = {row[0] for row in conn.execute("SELECT id FROM jobs")}
+    assert ids == {running.id}
+
+
 def test_output_format_mkv_creates_mkv_download(manager, tiny_video, cpu_engine):
     job = manager.create_job("tiny.mkv", tiny_video.read_bytes())
     manager.start(job.id, ENGINE, 2, options={
@@ -96,6 +122,32 @@ def test_output_format_mkv_creates_mkv_download(manager, tiny_video, cpu_engine)
     assert job.download_filename == "tiny_x2.mkv"
     assert job.download_path == job.subtitle_path
     assert pipeline.probe(job.subtitle_path).width == 128
+
+
+def test_subtitle_format_srt_creates_text_download(manager, tiny_video, cpu_engine, tmp_path):
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:00,500\nHello\n", encoding="utf-8")
+    source = tmp_path / "source.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(tiny_video), "-i", str(srt),
+         "-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt", str(source)],
+        check=True,
+    )
+
+    job = manager.create_job("source.mkv", source.read_bytes())
+    manager.start(job.id, ENGINE, 2, options={
+        "encode": {"encoder": "libx264", "subtitles": "srt"},
+    })
+    job = _wait(manager, job.id)
+    assert job.status == "done", job.message
+    assert job.subtitle_path is not None and job.subtitle_path.exists()
+    codec = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s:0",
+         "-show_entries", "stream=codec_name", "-of",
+         "default=noprint_wrappers=1:nokey=1", str(job.subtitle_path)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert codec == "subrip"
 
 
 def test_preview_then_full_render_and_persistence(manager, tiny_video, cpu_engine, tmp_path):
@@ -174,6 +226,8 @@ def test_start_validation(manager, tiny_video, cpu_engine):
     with pytest.raises(ValueError):
         manager.start(job.id, ENGINE, 2, options={"encode": {"format": "avi"}})
     with pytest.raises(ValueError):
+        manager.start(job.id, ENGINE, 2, options={"encode": {"subtitles": "vtt"}})
+    with pytest.raises(ValueError):
         manager.start(job.id, "no-such-engine", 2)
 
 
@@ -211,6 +265,13 @@ def test_api_end_to_end(tiny_video, cpu_engine, tmp_path, monkeypatch):
     assert res.status_code == 200
     assert "tiny_x2_preview.mp4" in res.headers["content-disposition"]
     assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
+
+    res = client.delete(f"/api/jobs/{job_id}")
+    assert res.status_code == 200, res.text
+    assert client.get(f"/api/jobs/{job_id}").status_code == 404
+    assert not job.dir.exists()
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 404
+    assert client.delete("/api/jobs").json()["deleted"] == 0
 
 
 def test_pause_and_resume_running_job(manager, tiny_video, cpu_engine, monkeypatch):

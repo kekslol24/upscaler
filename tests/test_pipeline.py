@@ -1,4 +1,6 @@
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -80,6 +82,126 @@ def test_mux_subtitles_keeps_text_subtitles(tiny_video, tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert codec in ("subrip", "ass")
+
+
+def test_mux_subtitles_srt_converts_ass_and_strips_markup(tiny_video, tmp_path):
+    """SRT output is plain text, so Android/TV players can render it
+    client-side and direct-play the video."""
+    ass = tmp_path / "subs.ass"
+    ass.write_text(
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,"
+        "&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:00.50,Default,,0,0,0,,"
+        "{\\an8}<font face=\"Arial\"><b>Hello</b></font>\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "with_ass.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(tiny_video), "-i", str(ass),
+         "-map", "0", "-map", "1", "-c", "copy", "-c:s", "ass", str(source)],
+        check=True,
+    )
+
+    out = tmp_path / "out.mkv"
+    pipeline.mux_subtitles(tiny_video, source, out, subtitle_format="srt")
+
+    codec = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s:0",
+         "-show_entries", "stream=codec_name", "-of",
+         "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert codec == "subrip"
+
+    text = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(out), "-map", "0:s:0", "-f", "srt", "-"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "Hello" in text
+    assert "<" not in text and "{\\" not in text
+
+
+def test_mux_subtitles_ass_converts_text(tiny_video, tmp_path):
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:00,500\nHello\n", encoding="utf-8")
+    source = tmp_path / "with_srt.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(tiny_video), "-i", str(srt),
+         "-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt", str(source)],
+        check=True,
+    )
+
+    out = tmp_path / "out.mkv"
+    pipeline.mux_subtitles(tiny_video, source, out, subtitle_format="ass")
+    codec = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s:0",
+         "-show_entries", "stream=codec_name", "-of",
+         "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert codec == "ass"
+
+
+def test_mux_subtitles_rejects_unknown_format(tiny_video, tmp_path):
+    with pytest.raises(ValueError):
+        pipeline.mux_subtitles(
+            tiny_video, tiny_video, tmp_path / "out.mkv", subtitle_format="vtt",
+        )
+
+
+def test_convert_subs_script_in_place(tiny_video, tmp_path):
+    """The subtitle-only command converts an existing file without a render."""
+    ass = tmp_path / "subs.ass"
+    ass.write_text(
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,"
+        "&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:00.50,Default,,0,0,0,,"
+        "{\\an8}<b>Hello</b>\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(tiny_video), "-i", str(ass),
+         "-map", "0", "-map", "1", "-c", "copy", "-c:s", "ass", str(source)],
+        check=True,
+    )
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "convert_subs.py"
+    subprocess.run([sys.executable, str(script), "--in-place", str(source)], check=True)
+
+    codec = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s:0",
+         "-show_entries", "stream=codec_name", "-of",
+         "default=noprint_wrappers=1:nokey=1", str(source)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert codec == "subrip"
+    info = pipeline.probe(source)
+    assert (info.width, info.height) == (64, 48) and info.has_audio
 
 
 def test_streaming_roundtrip_with_clip_and_filters(tiny_video, tmp_path):

@@ -17,6 +17,7 @@ const interpEngineSelect = $("interpEngineSelect");
 const interpHint = $("interpHint");
 const codecSelect = $("codecSelect");
 const formatSelect = $("formatSelect");
+const subtitlesSelect = $("subtitlesSelect");
 const encoderSelect = $("encoderSelect");
 const qualityInput = $("qualityInput");
 const encoderHint = $("encoderHint");
@@ -47,6 +48,10 @@ const downloadAltLink = $("downloadAltLink");
 const outputPath = $("outputPath");
 const jobsSection = $("jobsSection");
 const jobsBody = $("jobsBody");
+const clearJobsBtn = $("clearJobsBtn");
+
+//: statuses the backend allows deleting (active renders must be cancelled)
+const REMOVABLE_STATUSES = new Set(["uploaded", "done", "error", "cancelled"]);
 
 let engines = [];
 let presets = [];
@@ -246,6 +251,7 @@ function applyPreset(preset) {
   encoderSelect.value = enc.encoder || "auto";
   qualityInput.value = enc.quality || 18;
   formatSelect.value = enc.format || "mp4";
+  subtitlesSelect.value = enc.subtitles || "copy";
 }
 
 function markCustom() {
@@ -284,7 +290,7 @@ codecSelect.addEventListener("change", () => {
   updateEncoderOptions();
   markCustom();
 });
-for (const el of [scaleSelect, deinterlaceInput, denoiseSelect, sharpenInput, encoderSelect, qualityInput]) {
+for (const el of [scaleSelect, deinterlaceInput, denoiseSelect, sharpenInput, encoderSelect, qualityInput, subtitlesSelect]) {
   el.addEventListener("change", markCustom);
 }
 
@@ -303,6 +309,14 @@ function setSource(job) {
   if (Number(previewStartInput.value) > job.duration) previewStartInput.value = 0;
   previewBtn.disabled = false;
   renderBtn.disabled = false;
+}
+
+function forgetSource(jobId) {
+  if (!currentJob || currentJob.id !== jobId) return;
+  currentJob = null;
+  previewBtn.disabled = true;
+  renderBtn.disabled = true;
+  sourceInfo.textContent = "Pick one or more files — they upload straight away so you can preview settings before committing.";
 }
 
 const UPLOAD_CHUNK = 8 * 1024 * 1024;
@@ -378,6 +392,7 @@ function collectOptions(preview) {
     encode: {
       codec: codecSelect.value,
       format: formatSelect.value,
+      subtitles: subtitlesSelect.value,
       encoder: encoderSelect.value,
       quality: Number(qualityInput.value),
     },
@@ -461,6 +476,24 @@ async function renderAllUploaded() {
 renderAllBtn.addEventListener("click", renderAllUploaded);
 previewBtn.addEventListener("click", () => startRender(true));
 renderBtn.addEventListener("click", () => startRender(false));
+
+clearJobsBtn.addEventListener("click", async () => {
+  if (!confirm("Remove all finished and uploaded jobs and delete their files?")) return;
+  clearJobsBtn.disabled = true;
+  try {
+    await fetchJson("/api/jobs", { method: "DELETE" });
+    if (currentJob && REMOVABLE_STATUSES.has(currentJob.status)) {
+      currentJob = null;
+      previewBtn.disabled = true;
+      renderBtn.disabled = true;
+      sourceInfo.textContent = "Pick one or more files — they upload straight away so you can preview settings before committing.";
+    }
+    loadJobs();
+  } catch (err) {
+    showError(err.message || String(err));
+    clearJobsBtn.disabled = false;
+  }
+});
 
 cancelBtn.addEventListener("click", async () => {
   if (!activeJobId) return;
@@ -596,10 +629,13 @@ function showCompare(job, compareOverride) {
     videoAfter.style.clipPath = "none";
   }
   const mkvPrimary = job.output_format === "mkv" && job.has_subtitle_output;
+  const subFormat = (job.options && job.options.encode && job.options.encode.subtitles) || "copy";
+  const subLabel = subFormat === "srt" ? "SRT" : subFormat === "ass" ? "ASS" : "";
+  const subSuffix = subLabel ? ` (${subLabel} subtitles)` : " (with subtitles)";
   downloadLink.href = `/api/jobs/${job.id}/output?download=1`;
   downloadLink.download = job.download_filename || job.output_filename;
   downloadLink.textContent = `Download ${job.download_filename || job.output_filename}`
-    + (mkvPrimary ? " (with subtitles)" : "");
+    + (mkvPrimary ? subSuffix : "");
   if (mkvPrimary) {
     downloadAltLink.hidden = false;
     downloadAltLink.href = `/api/jobs/${job.id}/output?download=1&mp4=1`;
@@ -610,7 +646,7 @@ function showCompare(job, compareOverride) {
     downloadAltLink.href = `/api/jobs/${job.id}/output?download=1&mkv=1`;
     downloadAltLink.download = job.subtitle_output_filename;
     downloadAltLink.textContent =
-      `Download ${job.subtitle_output_filename} (with subtitles)`;
+      `Download ${job.subtitle_output_filename}${subSuffix}`;
   } else {
     downloadAltLink.hidden = true;
   }
@@ -659,6 +695,9 @@ async function loadJobs() {
   }
   jobsBody.innerHTML = "";
   jobsSection.hidden = jobs.length === 0;
+  const removable = jobs.filter((job) => REMOVABLE_STATUSES.has(job.status));
+  clearJobsBtn.hidden = removable.length === 0;
+  clearJobsBtn.disabled = uploading;
   renderAllBtn.disabled = uploading || !jobs.some((job) => job.status === "uploaded");
   for (const job of jobs) {
     const tr = document.createElement("tr");
@@ -730,6 +769,27 @@ async function loadJobs() {
         pollJob(job.id);
       });
       actions.appendChild(watchBtn);
+    }
+    if (REMOVABLE_STATUSES.has(job.status)) {
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "small secondary";
+      removeBtn.textContent = "×";
+      removeBtn.title = "Remove this job and delete its files";
+      removeBtn.setAttribute("aria-label", `Remove ${job.filename}`);
+      removeBtn.addEventListener("click", async () => {
+        if (!confirm(`Remove "${job.filename}" and delete its files?`)) return;
+        removeBtn.disabled = true;
+        try {
+          await fetchJson(`/api/jobs/${job.id}`, { method: "DELETE" });
+          forgetSource(job.id);
+          loadJobs();
+        } catch (err) {
+          showError(err.message || String(err));
+          removeBtn.disabled = false;
+        }
+      });
+      actions.appendChild(removeBtn);
     }
     jobsBody.appendChild(tr);
   }
