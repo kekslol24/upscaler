@@ -517,8 +517,10 @@ class JobManager:
 
     def list(self, limit: int = 20) -> list[Job]:
         with self._lock:
-            jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
-        return jobs[:limit]
+            recent = sorted(
+                self._jobs.values(), key=lambda j: j.created_at, reverse=True
+            )[:limit]
+            return sorted(recent, key=lambda j: j.created_at)
 
     def delete(self, job_id: str) -> None:
         """Remove a finished job, its database row and its files.
